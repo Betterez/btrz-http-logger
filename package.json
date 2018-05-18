@@ -8,7 +8,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://hgarcia:d97baf94ae2f32d7eb221062cb09f2428b293e82@github.com/Betterez/btrz-http-logger.git"
+    "url": "git+https://github.com/Betterez/btrz-http-logger.git"
   },
   "author": "",
   "license": "MIT",
