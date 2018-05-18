@@ -1,0 +1,25 @@
+{
+  "name": "btrz-http-logger",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://hgarcia:d97baf94ae2f32d7eb221062cb09f2428b293e82@github.com/Betterez/btrz-http-logger.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Betterez/btrz-http-logger/issues"
+  },
+  "homepage": "https://github.com/Betterez/btrz-http-logger#readme",
+  "dependencies": {
+    "morgan": "^1.9.0"
+  },
+  "devDependencies": {
+    "publish": "^0.6.0"
+  }
+}
