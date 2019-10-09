@@ -4,7 +4,9 @@ const morgan = require("morgan");
 
 module.exports = function _default(app, stream, name) {
   morgan.token("serverId", () => {
-    const instanceId = (app.ec2Metadata && app.ec2Metadata.instanceId) || "missing";
+    const ec2Instance = app.ec2Metadata && app.ec2Metadata.instanceId;
+    const serverInstance = app.server && app.server.instanceId;
+    const instanceId = ec2Instance || serverInstance || "missing";
     const processId = `#${process.pid}`;
 
     return `${instanceId}${processId}`;
