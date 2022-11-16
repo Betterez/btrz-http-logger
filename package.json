@@ -4,6 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "postversion": "git push origin master && git push --tags",
+    "version": "git tag $1",
     "test": "echo no test"
   },
   "repository": {
@@ -17,6 +19,6 @@
   },
   "homepage": "https://github.com/Betterez/btrz-http-logger#readme",
   "dependencies": {
-    "morgan": "^1.9.0"
+    "morgan": "^1.10.0"
   }
 }
