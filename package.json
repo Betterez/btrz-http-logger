@@ -19,6 +19,7 @@
   },
   "homepage": "https://github.com/Betterez/btrz-http-logger#readme",
   "dependencies": {
+    "lodash.memoize": "^4.1.2",
     "morgan": "^1.10.0",
     "chalk": "^4.1.2"
   }
