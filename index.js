@@ -3,6 +3,7 @@ const process = require("process");
 const chalk = require("chalk");
 const memoize = require("lodash.memoize");
 const morgan = require("morgan");
+const {trace: otlpTrace} = require("@opentelemetry/api");
 
 const colorSchemes = {
   NO_COLOR: "NO_COLOR",
@@ -26,6 +27,10 @@ module.exports = function _default(app, stream, name, config = {}) {
     return (req.headers["x-amzn-trace-id"] || "").replace("=", "-");
   });
 
+  morgan.token("grafanaTraceId", () => {
+    return otlpTrace.getActiveSpan()?.spanContext().traceId || "-";
+  });
+
   const getRequestLogFormatter = memoize((colorScheme) => {
     let colorFn;
 
@@ -41,7 +46,7 @@ module.exports = function _default(app, stream, name, config = {}) {
     }
 
     return morgan.compile(
-      colorFn(`[${name}-req] serverId=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" date=":date[iso]" traceId=":traceId" method=:method url=":url" http=:http-version referrer=":referrer" useragent=":user-agent"`)
+      colorFn(`[${name}-req] serverId=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" date=":date[iso]" traceId=":traceId" grafanaTraceId=":grafanaTraceId" method=:method url=":url" http=:http-version referrer=":referrer" useragent=":user-agent"`)
     );
   });
 
@@ -73,7 +78,7 @@ module.exports = function _default(app, stream, name, config = {}) {
     }
 
     return morgan.compile(
-      `[${name}-res] serverId=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" responsetime=:response-time[1] date=":date[iso]" traceId=":traceId" method=:method url=":url" http=:http-version ${statusCodeColorFn("status=", ":status")} responselength=:res[content-length] referrer=":referrer" useragent=":user-agent"`
+      `[${name}-res] serverId=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" responsetime=:response-time[1] date=":date[iso]" traceId=":traceId" grafanaTraceId=":grafanaTraceId" method=:method url=":url" http=:http-version ${statusCodeColorFn("status=", ":status")} responselength=:res[content-length] referrer=":referrer" useragent=":user-agent"`
     );
   });
 
