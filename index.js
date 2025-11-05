@@ -46,7 +46,7 @@ module.exports = function _default(app, stream, name, config = {}) {
     }
 
     return morgan.compile(
-      colorFn(`[${name}-req] serverId=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" date=":date[iso]" traceId=":traceId" grafanaTraceId=":grafanaTraceId" method=:method url=":url" http=:http-version referrer=":referrer" useragent=":user-agent"`)
+      colorFn(`[${name}-req] server_id=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" date=":date[iso]" amzn_trace_id=":traceId" grafana_trace_id=":grafanaTraceId" method=:method url=":url" http=:http-version referrer=":referrer" useragent=":user-agent"`)
     );
   });
 
@@ -78,7 +78,7 @@ module.exports = function _default(app, stream, name, config = {}) {
     }
 
     return morgan.compile(
-      `[${name}-res] serverId=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" responsetime=:response-time[1] date=":date[iso]" traceId=":traceId" grafanaTraceId=":grafanaTraceId" method=:method url=":url" http=:http-version ${statusCodeColorFn("status=", ":status")} responselength=:res[content-length] referrer=":referrer" useragent=":user-agent"`
+      `[${name}-res] server_id=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" responsetime=:response-time[1] date=":date[iso]" amzn_trace_id=":traceId" grafana_trace_id=":grafanaTraceId" method=:method url=":url" http=:http-version ${statusCodeColorFn("status=", ":status")} responselength=:res[content-length] referrer=":referrer" useragent=":user-agent"`
     );
   });
 
