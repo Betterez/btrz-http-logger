@@ -1,6 +1,7 @@
 "use strict";
 const process = require("process");
-const chalk = require("chalk");
+const {Chalk} = require("chalk");
+const chalk = new Chalk({level: 3});
 const memoize = require("lodash.memoize");
 const morgan = require("morgan");
 const {trace: otlpTrace} = require("@opentelemetry/api");
