@@ -1,6 +1,6 @@
 "use strict";
 const process = require("process");
-const {Chalk} = require("chalk");
+const {Instance: Chalk} = require("chalk");
 // In production environments, Chalk will detect that the terminal does not support colours, and will fail to colourize
 // the output.  Force Chalk to output colours in all environments by setting the "level" option.
 const chalk = new Chalk({level: 3});
