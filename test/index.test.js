@@ -32,6 +32,13 @@ function createMorganMock() {
   };
 }
 
+test("module loads with the installed chalk package", () => {
+  delete require.cache[moduleUnderTestPath];
+  assert.doesNotThrow(() => {
+    require(moduleUnderTestPath);
+  });
+});
+
 function createChalkMock() {
   class ChalkInstance {
     dim(value) {
