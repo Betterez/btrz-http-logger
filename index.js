@@ -1,13 +1,26 @@
 "use strict";
 const process = require("process");
-const chalkModule = require("chalk");
-// In production environments, Chalk will detect that the terminal does not support colours, and will fail to colourize
-// the output.  Force Chalk to output colours in all environments by setting the "level" option.
-const ChalkConstructor = chalkModule.Instance || chalkModule.Chalk;
-const chalk = ChalkConstructor ? new ChalkConstructor({level: 3}) : chalkModule;
-const memoize = require("lodash.memoize");
+const memoize = require("./src/memoize");
 const morgan = require("morgan");
 const {trace: otlpTrace} = require("@opentelemetry/api");
+
+const ansi = {
+  wrap(text, openCode, closeCode) {
+    return `\u001b[${openCode}m${text}\u001b[${closeCode}m`;
+  },
+  dim(text) {
+    return this.wrap(text, 2, 22);
+  },
+  bold(text) {
+    return this.wrap(text, 1, 22);
+  },
+  red(text) {
+    return this.wrap(text, 31, 39);
+  },
+  magenta(text) {
+    return this.wrap(text, 35, 39);
+  }
+};
 
 const colorSchemes = {
   NO_COLOR: "NO_COLOR",
@@ -65,7 +78,7 @@ module.exports = function _default(app, stream, name, config = {}) {
         colorFn = (logFormatString) => logFormatString;
         break;
       case colorSchemes.DIM_TEXT:
-        colorFn = (logFormatString) => chalk.dim(logFormatString);
+        colorFn = (logFormatString) => ansi.dim(logFormatString);
         break;
       default:
         throw new Error(`Unknown color scheme ${colorScheme}`);
@@ -94,10 +107,10 @@ module.exports = function _default(app, stream, name, config = {}) {
         statusCodeColorFn = (label, statusCode) => `${label}${statusCode}`;
         break;
       case colorSchemes.RED_STATUS_CODE:
-        statusCodeColorFn = (label, statusCode) => chalk.red(`${label}${chalk.bold(statusCode)}`);
+        statusCodeColorFn = (label, statusCode) => ansi.red(`${label}${ansi.bold(statusCode)}`);
         break;
       case colorSchemes.MAGENTA_STATUS_CODE:
-        statusCodeColorFn = (label, statusCode) => chalk.magenta(`${label}${chalk.bold(statusCode)}`);
+        statusCodeColorFn = (label, statusCode) => ansi.magenta(`${label}${ansi.bold(statusCode)}`);
         break;
       default:
         throw new Error(`Unknown color scheme ${colorScheme}`);

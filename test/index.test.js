@@ -39,27 +39,47 @@ test("module loads with the installed chalk package", () => {
   });
 });
 
-function createChalkMock() {
-  class ChalkInstance {
-    dim(value) {
-      return `DIM(${value})`;
+test("module loads without requiring chalk", () => {
+  const originalLoad = Module._load;
+  delete require.cache[moduleUnderTestPath];
+
+  Module._load = function patchedModuleLoad(request, parent, isMain) {
+    if (request === "chalk") {
+      throw new Error("chalk not installed");
     }
 
-    red(value) {
-      return `RED(${value})`;
-    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
 
-    magenta(value) {
-      return `MAGENTA(${value})`;
-    }
-
-    bold(value) {
-      return `BOLD(${value})`;
-    }
+  try {
+    assert.doesNotThrow(() => {
+      require(moduleUnderTestPath);
+    });
+  } finally {
+    Module._load = originalLoad;
   }
+});
 
-  return {Instance: ChalkInstance};
-}
+test("module loads without requiring lodash.memoize", () => {
+  const originalLoad = Module._load;
+  delete require.cache[moduleUnderTestPath];
+
+  Module._load = function patchedModuleLoad(request, parent, isMain) {
+    if (request === "lodash.memoize") {
+      throw new Error("lodash.memoize not installed");
+    }
+
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  try {
+    assert.doesNotThrow(() => {
+      require(moduleUnderTestPath);
+    });
+  } finally {
+    Module._load = originalLoad;
+  }
+});
 
 function withMockedDependencies(mocks, callback) {
   const originalLoad = Module._load;
@@ -121,7 +141,6 @@ function loadLoggerModule({
     {
       morgan: morganMock.morgan,
       "lodash.memoize": memoizeMock,
-      chalk: createChalkMock(),
       "@opentelemetry/api": {trace: otlpTraceMock}
     },
     () => require(moduleUnderTestPath)
@@ -228,7 +247,8 @@ test("request-log format uses dim style only when colorize is true", () => {
   colorized.loggerFactory(colorized.app, colorized.stream, "svc", {colorize: true});
 
   const colorOutput = colorized.morganMock.formats["request-log"]({}, {}, {});
-  assert.match(colorOutput, /^DIM\(\[svc-req]/);
+  assert.match(colorOutput, /^\u001b\[2m\[svc-req]/);
+  assert.match(colorOutput, /\u001b\[22m$/);
 });
 
 test("combined-log format colorizes status by response class", () => {
@@ -243,10 +263,10 @@ test("combined-log format colorizes status by response class", () => {
   const combinedFormatter = colorized.morganMock.formats["combined-log"];
 
   const redStatus = combinedFormatter({}, {}, {statusCode: 503});
-  assert.match(redStatus, /RED\(status=BOLD\(:status\)\)/);
+  assert.match(redStatus, /\u001b\[31mstatus=\u001b\[1m:status\u001b\[22m\u001b\[39m/);
 
   const magentaStatus = combinedFormatter({}, {}, {statusCode: 404});
-  assert.match(magentaStatus, /MAGENTA\(status=BOLD\(:status\)\)/);
+  assert.match(magentaStatus, /\u001b\[35mstatus=\u001b\[1m:status\u001b\[22m\u001b\[39m/);
 
   const plainStatus = combinedFormatter({}, {}, {statusCode: 200});
   assert.match(plainStatus, /status=:status/);

@@ -20,8 +20,6 @@
   "homepage": "https://github.com/Betterez/btrz-http-logger#readme",
   "dependencies": {
     "@opentelemetry/api": "1.9.1",
-    "lodash.memoize": "4.1.2",
-    "morgan": "1.10.1",
-    "chalk": "4.1.2"
+    "morgan": "1.11.0"
   }
 }
