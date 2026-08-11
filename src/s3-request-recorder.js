@@ -81,25 +81,55 @@ function buildS3Key({prefix, windowStart, instanceId}) {
   return normalized ? `${normalized}/${base}` : base;
 }
 
-function s3RequestRecorder(config = {}) {
-  const warn = config.warn || console.warn;
-  const logError = config.logError || ((err, msg) => console.error(msg, err));
-  const fs = config.fs || fsp;
-  const nowFn = config.now || (() => new Date());
+function safelyLog(logger, level, message, data) {
+  if (!logger || typeof logger[level] !== "function") {
+    return;
+  }
+  try {
+    if (data === undefined) {
+      logger[level](message);
+    } else {
+      logger[level](message, data);
+    }
+  } catch (_err) {}
+}
 
-  if (!config.bucket) {
+/**
+ * @param {Object} config
+ * @param {string} config.bucket
+ * @param {import("btrz-logger").Logger} config.logger - btrz-logger instance (`info`, `error`, …)
+ * @param {string} [config.prefix]
+ * @param {string} [config.region]
+ * @param {number} [config.windowMinutes=15]
+ * @param {string} [config.instanceId]
+ * @param {string} [config.tempDir]
+ * @param {import("@aws-sdk/client-s3").S3Client} [config.s3Client]
+ * @param {Function} [config.onSignal] - test seam for process signal registration
+ */
+function s3RequestRecorder(config = {}) {
+  const logger = config.logger;
+
+  if (!config.bucket || !logger) {
     let warned = false;
     return function noopS3RequestRecorder(req, res, next) {
       if (!warned) {
         warned = true;
-        try {
-          warn("[btrz-http-logger] s3RequestRecorder: missing bucket; middleware disabled");
-        } catch (_err) {}
+        if (!logger) {
+          // cannot log without a logger
+        } else {
+          safelyLog(
+            logger,
+            "error",
+            "[btrz-http-logger] s3RequestRecorder: missing bucket; middleware disabled"
+          );
+        }
       }
       next();
     };
   }
 
+  const bucket = config.bucket;
+  const prefix = config.prefix || "";
   const windowMinutes = config.windowMinutes == null ? 15 : config.windowMinutes;
   const instanceId = config.instanceId || `${os.hostname()}-${process.pid}`;
   const tempDir = config.tempDir || os.tmpdir();
@@ -113,19 +143,13 @@ function s3RequestRecorder(config = {}) {
     return path.join(tempDir, `btrz-http-logger-${instanceId}-${stamp}.ndjson`);
   }
 
-  function safelyLogError(err, message) {
-    try {
-      logError(err, message);
-    } catch (_err) {}
-  }
-
   function trackAppend(filePath, line) {
     const previousAppend = inFlightAppends.get(filePath) || Promise.resolve();
     const append = previousAppend
-      .then(() => fs.mkdir(tempDir, {recursive: true}))
-      .then(() => fs.appendFile(filePath, line, "utf8"))
+      .then(() => fsp.mkdir(tempDir, {recursive: true}))
+      .then(() => fsp.appendFile(filePath, line, "utf8"))
       .catch((err) => {
-        safelyLogError(err, "[btrz-http-logger] s3RequestRecorder append failed");
+        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder append failed", err);
       });
 
     inFlightAppends.set(filePath, append);
@@ -139,25 +163,25 @@ function s3RequestRecorder(config = {}) {
   function flushFile(filePath, windowStart) {
     const work = Promise.resolve()
       .then(() => inFlightAppends.get(filePath) || Promise.resolve())
-      .then(() => fs.readFile(filePath))
+      .then(() => fsp.readFile(filePath))
       .then((body) => {
         if (!body || !body.length) {
           return null;
         }
         return s3Client.send(
           new PutObjectCommand({
-            Bucket: config.bucket,
-            Key: buildS3Key({prefix: config.prefix, windowStart, instanceId}),
+            Bucket: bucket,
+            Key: buildS3Key({prefix, windowStart, instanceId}),
             Body: body,
             ContentType: "application/x-ndjson"
           })
         );
       })
       .catch((err) => {
-        safelyLogError(err, "[btrz-http-logger] s3RequestRecorder S3 upload failed");
+        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder S3 upload failed", err);
       })
-      .finally(() => fs.unlink(filePath).catch((err) => {
-        safelyLogError(err, "[btrz-http-logger] s3RequestRecorder temp delete failed");
+      .finally(() => fsp.unlink(filePath).catch((err) => {
+        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
       }));
 
     work.catch(() => {});
@@ -185,7 +209,7 @@ function s3RequestRecorder(config = {}) {
 
   return function s3RequestRecorderMiddleware(req, res, next) {
     try {
-      const now = nowFn();
+      const now = new Date();
       const windowStart = getWindowStart(now, windowMinutes);
       if (activeWindowStartMs !== windowStart.getTime()) {
         if (activeWindowStartMs !== null) {
@@ -196,10 +220,9 @@ function s3RequestRecorder(config = {}) {
       }
 
       const line = serializeRecord(buildRecord(req, now));
-      const filePath = activeTempPath;
-      trackAppend(filePath, line);
+      trackAppend(activeTempPath, line);
     } catch (err) {
-      safelyLogError(err, "[btrz-http-logger] s3RequestRecorder record failed");
+      safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder record failed", err);
     }
     next();
   };

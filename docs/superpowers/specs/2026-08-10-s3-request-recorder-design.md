@@ -35,12 +35,12 @@ const {s3RequestRecorder} = require("btrz-http-logger");
 
 app.use(s3RequestRecorder({
   bucket: "my-bucket",              // required; missing → no-op middleware
+  logger,                           // required; btrz-logger instance (`info` / `error` / …)
   prefix: "http-requests/my-service", // optional
   region: "us-east-1",              // optional (AWS default chain)
   windowMinutes: 15,                // optional, default 15
   instanceId: "i-abc",              // optional; fallback hostname + pid
-  tempDir: undefined,               // optional; default os.tmpdir()
-  s3Client: undefined               // optional; for tests / DI
+  tempDir: undefined                // optional; default os.tmpdir()
 }));
 ```
 
@@ -48,15 +48,17 @@ app.use(s3RequestRecorder({
 
 | Option | Required | Default | Notes |
 |--------|----------|---------|-------|
-| `bucket` | yes | — | If missing/empty, return no-op middleware that only calls `next()`, with a one-time warning |
+| `bucket` | yes | — | If missing/empty, return no-op middleware that only calls `next()`, with a one-time `logger.error` |
+| `logger` | yes | — | `btrz-logger` `Logger` instance. Uses `logger.error(msg)` / `logger.error(msg, err)` for failures and missing-bucket notice. Missing logger → silent no-op |
 | `prefix` | no | `""` | Leading/trailing slashes normalized when building keys |
 | `region` | no | SDK default | Passed to `@aws-sdk/client-s3` when creating client |
 | `windowMinutes` | no | `15` | S3 key partition size; flush happens when a later request observes a new window (no timer) |
 | `instanceId` | no | `hostname-pid` | Used in S3 object key |
 | `tempDir` | no | `os.tmpdir()` | Local NDJSON buffer directory |
-| `s3Client` | no | new `S3Client` | Injectable for unit tests |
 
-Credentials use the default AWS SDK credential chain unless the injected `s3Client` is preconfigured.
+Do **not** inject `fs`, `now`, `warn`, or `logError` via config. Always use `fs.promises` and `new Date()`. Logging goes through the provided `btrz-logger` instance.
+
+Credentials use the default AWS SDK credential chain (or an optional test-only `s3Client` if provided by the consumer for tests).
 
 ## Request path behavior
 
@@ -144,12 +146,12 @@ Existing Morgan behavior and tests remain unchanged.
 
 | Failure | Request impact |
 |---------|----------------|
-| Missing `bucket` | No-op middleware; `next()` only |
-| Temp dir / append failure | Log asynchronously; `next()` already called |
+| Missing `bucket` or `logger` | No-op middleware; `next()` only (`logger.error` once if logger present but bucket missing) |
+| Temp dir / append failure | `logger.error` asynchronously; `next()` already called |
 | Body / JSON serialize failure | Record without `body`; `next()` |
-| S3 `PutObject` failure | Log error asynchronously; delete temp file anyway; request already continued |
-| Temp file delete after upload attempt | Log if delete fails; request unaffected |
-| Unexpected throw in middleware | Catch; `next()` |
+| S3 `PutObject` failure | `logger.error` asynchronously; delete temp file anyway; request already continued |
+| Temp file delete after upload attempt | `logger.error` if delete fails; request unaffected |
+| Unexpected throw in middleware | Catch; `logger.error`; `next()` |
 
 ## Testing strategy (TDD-first)
 
