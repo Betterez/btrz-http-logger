@@ -17,7 +17,7 @@ Constraints:
 ## Non-goals
 
 - Not wired into the existing Morgan request/response factory (`module.exports = function (app, stream, name, config)`).
-- No response body / status recording.
+- No response body recording. (Status + duration: see `2026-08-11-s3-recorder-status-duration-design.md`.)
 - No header redaction.
 - No cross-instance merging of S3 objects.
 - No raw stream body buffering (does not replace body-parser).
@@ -181,7 +181,7 @@ Mocks: inject `s3Client` (or mock `@aws-sdk/client-s3`), mock/stub filesystem as
 
 ## Out of scope for v1
 
-- Response capture
+- Response body / response header capture (status + duration covered in later addendum)
 - Header/body redaction
 - Cross-instance single-file merge
 - Compression of uploads
