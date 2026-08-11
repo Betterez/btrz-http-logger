@@ -298,6 +298,38 @@ test("omits body when req.body is undefined", async () => {
   assert.equal(Object.prototype.hasOwnProperty.call(record, "body"), false);
 });
 
+test("buildS3Key uses UTC window start and instanceId", () => {
+  delete require.cache[recorderPath];
+  const {buildS3Key} = require("../src/s3-request-recorder");
+  const key = buildS3Key({
+    prefix: "http-requests/sales",
+    windowStart: new Date("2026-08-11T03:15:00.000Z"),
+    instanceId: "i-abc123"
+  });
+  assert.equal(key, "http-requests/sales/2026/08/11/0315-i-abc123.ndjson");
+});
+
+test("buildS3Key normalizes prefix slashes", () => {
+  delete require.cache[recorderPath];
+  const {buildS3Key} = require("../src/s3-request-recorder");
+  assert.equal(
+    buildS3Key({
+      prefix: "/http-requests/sales/",
+      windowStart: new Date("2026-08-11T03:15:00.000Z"),
+      instanceId: "i-1"
+    }),
+    "http-requests/sales/2026/08/11/0315-i-1.ndjson"
+  );
+  assert.equal(
+    buildS3Key({
+      prefix: "",
+      windowStart: new Date("2026-08-11T03:15:00.000Z"),
+      instanceId: "i-1"
+    }),
+    "2026/08/11/0315-i-1.ndjson"
+  );
+});
+
 test("calls next even when append fails asynchronously", async () => {
   const errors = [];
   const appendDone = createDeferred();

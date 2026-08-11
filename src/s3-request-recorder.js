@@ -59,6 +59,28 @@ function serializeRecord(record) {
   }
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function getWindowStart(date, windowMinutes) {
+  const d = new Date(date.getTime());
+  d.setUTCSeconds(0, 0);
+  const mins = d.getUTCMinutes();
+  d.setUTCMinutes(mins - (mins % windowMinutes));
+  return d;
+}
+
+function buildS3Key({prefix, windowStart, instanceId}) {
+  const yyyy = windowStart.getUTCFullYear();
+  const MM = pad2(windowStart.getUTCMonth() + 1);
+  const dd = pad2(windowStart.getUTCDate());
+  const HHmm = `${pad2(windowStart.getUTCHours())}${pad2(windowStart.getUTCMinutes())}`;
+  const normalized = String(prefix || "").replace(/^\/+|\/+$/g, "");
+  const base = `${yyyy}/${MM}/${dd}/${HHmm}-${instanceId}.ndjson`;
+  return normalized ? `${normalized}/${base}` : base;
+}
+
 function s3RequestRecorder(config = {}) {
   const warn = config.warn || console.warn;
   const logError = config.logError || ((err, msg) => console.error(msg, err));
@@ -87,14 +109,6 @@ function s3RequestRecorder(config = {}) {
 
   void s3Client;
 
-  function getWindowStart(date) {
-    const windowStart = new Date(date.getTime());
-    windowStart.setUTCSeconds(0, 0);
-    const minutes = windowStart.getUTCMinutes();
-    windowStart.setUTCMinutes(minutes - (minutes % windowMinutes));
-    return windowStart;
-  }
-
   function ensureTempPath(windowStart) {
     const stamp = windowStart.toISOString().replace(/[:.]/g, "-");
     return path.join(tempDir, `btrz-http-logger-${instanceId}-${stamp}.ndjson`);
@@ -103,7 +117,7 @@ function s3RequestRecorder(config = {}) {
   return function s3RequestRecorderMiddleware(req, res, next) {
     try {
       const now = nowFn();
-      const windowStart = getWindowStart(now);
+      const windowStart = getWindowStart(now, windowMinutes);
       if (activeWindowStartMs !== windowStart.getTime()) {
         activeWindowStartMs = windowStart.getTime();
         activeTempPath = ensureTempPath(windowStart);
@@ -128,4 +142,4 @@ function s3RequestRecorder(config = {}) {
   };
 }
 
-module.exports = {s3RequestRecorder};
+module.exports = {s3RequestRecorder, buildS3Key, getWindowStart};
