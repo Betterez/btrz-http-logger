@@ -365,3 +365,225 @@ test("calls next even when append fails asynchronously", async () => {
   await new Promise((r) => setImmediate(r));
   assert.ok(errors.length >= 1);
 });
+
+test("flushes previous window to S3 and deletes temp file on success", async () => {
+  const files = new Map();
+  const puts = [];
+  const unlinks = [];
+  let currentNow = new Date("2026-08-11T03:16:00.000Z");
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const mw = s3RequestRecorder({
+    bucket: "my-bucket",
+    prefix: "http-requests/sales",
+    instanceId: "i-abc123",
+    windowMinutes: 15,
+    tempDir: "/tmp/btrz-s3-rec",
+    now: () => currentNow,
+    fs: {
+      async mkdir() {},
+      async appendFile(filePath, data) {
+        files.set(filePath, (files.get(filePath) || "") + data);
+      },
+      async readFile(filePath) {
+        if (!files.has(filePath)) {
+          throw Object.assign(new Error("ENOENT"), {code: "ENOENT"});
+        }
+        return files.get(filePath);
+      },
+      async unlink(filePath) {
+        unlinks.push(filePath);
+        files.delete(filePath);
+      }
+    },
+    s3Client: {
+      send: async (command) => {
+        puts.push(command.input || command);
+        return {};
+      }
+    },
+    logError: () => {}
+  });
+
+  mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  currentNow = new Date("2026-08-11T03:30:00.000Z");
+  mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].Bucket, "my-bucket");
+  assert.equal(puts[0].Key, "http-requests/sales/2026/08/11/0315-i-abc123.ndjson");
+  assert.equal(puts[0].ContentType, "application/x-ndjson");
+  assert.match(String(puts[0].Body), /"url":"\/a"/);
+  assert.equal(unlinks.length, 1);
+});
+
+test("on upload failure logs error and still deletes temp file", async () => {
+  const files = new Map();
+  const unlinks = [];
+  const errors = [];
+  let currentNow = new Date("2026-08-11T03:16:00.000Z");
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const mw = s3RequestRecorder({
+    bucket: "my-bucket",
+    instanceId: "i-1",
+    windowMinutes: 15,
+    tempDir: "/tmp/btrz-s3-rec",
+    now: () => currentNow,
+    fs: {
+      async mkdir() {},
+      async appendFile(filePath, data) {
+        files.set(filePath, (files.get(filePath) || "") + data);
+      },
+      async readFile(filePath) {
+        return files.get(filePath) || "";
+      },
+      async unlink(filePath) {
+        unlinks.push(filePath);
+        files.delete(filePath);
+      }
+    },
+    s3Client: {
+      send: async () => {
+        throw new Error("S3 down");
+      }
+    },
+    logError: (err, msg) => errors.push({err, msg})
+  });
+
+  mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  currentNow = new Date("2026-08-11T03:30:00.000Z");
+  mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.ok(errors.some((entry) => /S3|upload/i.test(String(entry.msg)) || /S3 down/.test(String(entry.err))));
+  assert.equal(unlinks.length, 1);
+});
+
+test("next is called before flush upload resolves", async () => {
+  const uploadGate = createDeferred();
+  const files = new Map();
+  let currentNow = new Date("2026-08-11T03:16:00.000Z");
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    instanceId: "i-1",
+    windowMinutes: 15,
+    tempDir: "/tmp/btrz-s3-rec",
+    now: () => currentNow,
+    fs: {
+      async mkdir() {},
+      async appendFile(filePath, data) {
+        files.set(filePath, (files.get(filePath) || "") + data);
+      },
+      async readFile(filePath) {
+        return files.get(filePath) || "";
+      },
+      async unlink() {}
+    },
+    s3Client: {
+      send: async () => uploadGate.promise
+    },
+    logError: () => {}
+  });
+
+  mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  currentNow = new Date("2026-08-11T03:30:00.000Z");
+
+  let nextCalled = 0;
+  mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {
+    nextCalled += 1;
+  });
+  assert.equal(nextCalled, 1);
+  uploadGate.resolve();
+});
+
+test("flush waits for an in-flight append before uploading", async () => {
+  const appendStarted = createDeferred();
+  const appendFinished = createDeferred();
+  const puts = [];
+  let currentNow = new Date("2026-08-11T03:16:00.000Z");
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    instanceId: "i-1",
+    windowMinutes: 15,
+    tempDir: "/tmp/btrz-s3-rec",
+    now: () => currentNow,
+    fs: {
+      async mkdir() {},
+      async appendFile() {
+        appendStarted.resolve();
+        await appendFinished.promise;
+      },
+      async readFile() {
+        return '{"url":"/a"}\n';
+      },
+      async unlink() {}
+    },
+    s3Client: {
+      send: async (command) => puts.push(command.input || command)
+    },
+    logError: () => {}
+  });
+
+  mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+  await appendStarted.promise;
+  currentNow = new Date("2026-08-11T03:30:00.000Z");
+  mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(puts.length, 0);
+
+  appendFinished.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(puts.length, 1);
+});
+
+test("skips S3 upload for an empty previous file but deletes it", async () => {
+  const unlinks = [];
+  const puts = [];
+  let currentNow = new Date("2026-08-11T03:16:00.000Z");
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    instanceId: "i-1",
+    windowMinutes: 15,
+    tempDir: "/tmp/btrz-s3-rec",
+    now: () => currentNow,
+    fs: {
+      async mkdir() {},
+      async appendFile() {},
+      async readFile() {
+        return "";
+      },
+      async unlink(filePath) {
+        unlinks.push(filePath);
+      }
+    },
+    s3Client: {
+      send: async (command) => puts.push(command.input || command)
+    },
+    logError: () => {}
+  });
+
+  mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  currentNow = new Date("2026-08-11T03:30:00.000Z");
+  mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(puts.length, 0);
+  assert.equal(unlinks.length, 1);
+});
