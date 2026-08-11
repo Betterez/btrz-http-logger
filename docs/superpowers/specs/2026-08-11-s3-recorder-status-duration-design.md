@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-11  
 **Repo:** `btrz-http-logger`  
-**Status:** Written — awaiting user review before implementation plan  
+**Status:** Approved — implementation plan written  
 **Extends:** `docs/superpowers/specs/2026-08-10-s3-request-recorder-design.md`
 
 ## Goal
