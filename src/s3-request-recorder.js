@@ -151,11 +151,20 @@ async function bodyToBuffer(body) {
   return Buffer.concat(chunks);
 }
 
+function hasExplicitCredentials(credentials) {
+  return Boolean(
+    credentials &&
+    credentials.accessKeyId &&
+    credentials.secretAccessKey
+  );
+}
+
 /**
  * @param {Object} config
  * @param {string} config.bucket
+ * @param {string} config.region
+ * @param {{accessKeyId: string, secretAccessKey: string, sessionToken?: string}} config.credentials
  * @param {string} [config.prefix]
- * @param {string} [config.region]
  * @param {number} [config.windowMinutes=15]
  * @param {string} [config.instanceId]
  * @param {string} [config.tempDir]
@@ -163,7 +172,7 @@ async function bodyToBuffer(body) {
  * @param {import("btrz-logger").Logger} logger - btrz-logger instance (`info`, `error`, …)
  */
 function s3RequestRecorder(config = {}, logger) {
-  if (!config.bucket || !logger) {
+  if (!config.bucket || !config.region || !hasExplicitCredentials(config.credentials) || !logger) {
     let warned = false;
     return function noopS3RequestRecorder(req, res, next) {
       if (!warned) {
@@ -172,7 +181,7 @@ function s3RequestRecorder(config = {}, logger) {
           safelyLog(
             logger,
             "error",
-            "[btrz-http-logger] s3RequestRecorder: missing bucket; middleware disabled"
+            "[btrz-http-logger] s3RequestRecorder: missing bucket, region, or credentials; middleware disabled"
           );
         }
       }
@@ -185,7 +194,17 @@ function s3RequestRecorder(config = {}, logger) {
   const windowMinutes = config.windowMinutes == null ? 15 : config.windowMinutes;
   const instanceId = config.instanceId || `${os.hostname()}-${process.pid}`;
   const tempDir = config.tempDir || os.tmpdir();
-  const s3Client = new S3Client(config.region ? {region: config.region} : {});
+  const credentials = {
+    accessKeyId: config.credentials.accessKeyId,
+    secretAccessKey: config.credentials.secretAccessKey
+  };
+  if (config.credentials.sessionToken) {
+    credentials.sessionToken = config.credentials.sessionToken;
+  }
+  const s3Client = new S3Client({
+    region: config.region,
+    credentials
+  });
   let activeWindowStartMs = null;
   let activeTempPath = null;
   const inFlightAppends = new Map();

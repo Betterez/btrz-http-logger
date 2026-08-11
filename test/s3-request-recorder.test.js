@@ -15,6 +15,7 @@ const indexPath = path.resolve(__dirname, "..", "index.js");
 function loadRecorderModule({send, get} = {}) {
   const puts = [];
   const gets = [];
+  const clientConfigs = [];
   const originalLoad = Module._load;
   const sendFn = send || (async () => ({}));
   const getFn = get || (async () => {
@@ -27,6 +28,10 @@ function loadRecorderModule({send, get} = {}) {
     if (request === "@aws-sdk/client-s3") {
       return {
         S3Client: class MockS3Client {
+          constructor(clientConfig) {
+            MockS3Client.lastConfig = clientConfig;
+            clientConfigs.push(clientConfig);
+          }
           send(command) {
             if (command.constructor.name === "GetObjectCommand") {
               gets.push(command.input || command);
@@ -59,7 +64,8 @@ function loadRecorderModule({send, get} = {}) {
       buildS3Key: mod.buildS3Key,
       getWindowStart: mod.getWindowStart,
       puts,
-      gets
+      gets,
+      clientConfigs
     };
   } finally {
     Module._load = originalLoad;
@@ -83,6 +89,21 @@ function createMockRes(statusCode = 200) {
 }
 
 function noopOnSignal() {}
+
+const TEST_AWS = {
+  region: "us-east-1",
+  credentials: {
+    accessKeyId: "AKIATEST",
+    secretAccessKey: "secret"
+  }
+};
+
+function recorderConfig(overrides = {}) {
+  return Object.assign({
+    region: TEST_AWS.region,
+    credentials: TEST_AWS.credentials
+  }, overrides);
+}
 
 function createTestLogger() {
   const entries = [];
@@ -186,7 +207,7 @@ test("returns no-op middleware when bucket is missing", () => {
   assert.equal(nextCalled, 1);
   assert.equal(logger.entries.length, 1);
   assert.equal(logger.entries[0].level, "error");
-  assert.match(logger.entries[0].msg, /missing bucket/);
+  assert.match(logger.entries[0].msg, /missing bucket, region, or credentials/);
 });
 
 test("returns no-op middleware when bucket is empty string", () => {
@@ -205,18 +226,74 @@ test("returns no-op middleware when bucket is empty string", () => {
   });
   assert.equal(nextCalled, 2);
   assert.equal(logger.entries.length, 1);
-  assert.match(logger.entries[0].msg, /missing bucket/);
+  assert.match(logger.entries[0].msg, /missing bucket, region, or credentials/);
 });
 
-test("returns no-op middleware when logger is missing", () => {
+test("returns no-op middleware when credentials are missing", () => {
   delete require.cache[recorderPath];
   const {s3RequestRecorder} = require("../src/s3-request-recorder");
-  const mw = s3RequestRecorder({bucket: "b"});
+  const logger = createTestLogger();
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    region: "us-east-1"
+  }, logger);
   let nextCalled = 0;
   mw({method: "GET", url: "/"}, {}, () => {
     nextCalled += 1;
   });
   assert.equal(nextCalled, 1);
+  assert.match(logger.entries[0].msg, /missing bucket, region, or credentials/);
+});
+
+test("returns no-op middleware when region is missing", () => {
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const logger = createTestLogger();
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    credentials: TEST_AWS.credentials
+  }, logger);
+  let nextCalled = 0;
+  mw({method: "GET", url: "/"}, {}, () => {
+    nextCalled += 1;
+  });
+  assert.equal(nextCalled, 1);
+  assert.match(logger.entries[0].msg, /missing bucket, region, or credentials/);
+});
+
+test("returns no-op middleware when logger is missing", () => {
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const mw = s3RequestRecorder(recorderConfig({bucket: "b"}));
+  let nextCalled = 0;
+  mw({method: "GET", url: "/"}, {}, () => {
+    nextCalled += 1;
+  });
+  assert.equal(nextCalled, 1);
+});
+
+test("constructs S3Client with explicit credentials from config", () => {
+  const {s3RequestRecorder, clientConfigs} = loadRecorderModule();
+  s3RequestRecorder(recorderConfig({
+    bucket: "b",
+    region: "eu-west-1",
+    credentials: {
+      accessKeyId: "AKIAEXPLICIT",
+      secretAccessKey: "explicit-secret",
+      sessionToken: "token"
+    },
+    onSignal: noopOnSignal
+  }), createTestLogger());
+
+  assert.equal(clientConfigs.length, 1);
+  assert.deepEqual(clientConfigs[0], {
+    region: "eu-west-1",
+    credentials: {
+      accessKeyId: "AKIAEXPLICIT",
+      secretAccessKey: "explicit-secret",
+      sessionToken: "token"
+    }
+  });
 });
 
 test("calls next without waiting for append or upload", async () => {
@@ -243,13 +320,13 @@ test("calls next without waiting for append or upload", async () => {
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw(
@@ -289,12 +366,12 @@ test("writes NDJSON with method url headers query and body when present", async 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw(
@@ -333,12 +410,12 @@ test("snapshots request body before next mutates it", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
       const req = {
         method: "POST",
         url: "/v1/orders",
@@ -369,12 +446,12 @@ test("parses query from url when req.query is missing", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw(
@@ -405,12 +482,12 @@ test("parses query from originalUrl when req.query and url lack querystring", as
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw(
@@ -442,12 +519,12 @@ test("omits body when req.body is undefined", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw(
@@ -481,12 +558,12 @@ test("calls next and omits body when req.body is circular", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       let nextCalled = 0;
       const res = createMockRes(200);
@@ -564,12 +641,12 @@ test("calls next even when append fails asynchronously", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, logger);
+      }), logger);
 
       let nextCalled = 0;
       const res = createMockRes(200);
@@ -594,14 +671,14 @@ test("flushes previous window to S3 and deletes temp file on success", async () 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         prefix: "http-requests/sales",
         instanceId: "i-abc123",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -637,13 +714,13 @@ test("on upload failure logs error and still deletes temp file", async () => {
           throw new Error("S3 down");
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, logger);
+      }), logger);
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -673,13 +750,13 @@ test("next is called before flush upload resolves", async () => {
       const {s3RequestRecorder} = loadRecorderModule({
         send: async () => uploadGate.promise
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -716,13 +793,13 @@ test("flush waits for an in-flight append before uploading", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -751,13 +828,13 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -787,7 +864,7 @@ test("signal handler flushes current window", async () => {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
 
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
@@ -795,7 +872,7 @@ test("signal handler flushes current window", async () => {
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res, () => {});
@@ -827,7 +904,7 @@ test("signal flush uploads appended data while an open request can record afterw
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
@@ -835,7 +912,7 @@ test("signal flush uploads appended data while an open request can record afterw
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -878,14 +955,14 @@ test("skips GetObject on first upload and merges subsequent partial flush", asyn
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         tempDir,
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -935,14 +1012,14 @@ test("GetObject failure still puts sealed body and deletes it on success", async
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         tempDir,
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, logger);
+      }), logger);
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -990,14 +1067,14 @@ test("preserves sealed file when GetObject and PutObject both fail", async () =>
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         tempDir,
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, logger);
+      }), logger);
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -1055,7 +1132,7 @@ test("signal flush isolates a request that starts during sealed S3 send", async 
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
@@ -1063,7 +1140,7 @@ test("signal flush isolates a request that starts during sealed S3 send", async 
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -1127,7 +1204,7 @@ test("signal flush preserves a request that fully finalizes during sealed S3 sen
           return {};
         }
       });
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
@@ -1135,7 +1212,7 @@ test("signal flush preserves a request that fully finalizes during sealed S3 sen
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -1179,7 +1256,7 @@ test("throwing response listener registration does not strand pending flush", as
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
@@ -1187,7 +1264,7 @@ test("throwing response listener registration does not strand pending flush", as
         onSignal: (event, handler) => {
           handlers[event] = handler;
         }
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
@@ -1232,12 +1309,12 @@ test("records status and durationMs on finish without aborted", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(201);
       mw(
@@ -1272,12 +1349,12 @@ test("records aborted true on close without finish", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(200);
       mw(
@@ -1304,12 +1381,12 @@ test("writes only one line when finish and close both fire", async () => {
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res = createMockRes(204);
       mw(
@@ -1338,14 +1415,14 @@ test("defers flush of previous window until pending request finishes", async () 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder, puts} = loadRecorderModule();
-      const mw = s3RequestRecorder({
+      const mw = s3RequestRecorder(recorderConfig({
         bucket: "my-bucket",
         prefix: "http-requests/sales",
         instanceId: "i-abc123",
         windowMinutes: 15,
         tempDir,
         onSignal: noopOnSignal
-      }, createTestLogger());
+      }), createTestLogger());
 
       const res1 = createMockRes(200);
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
