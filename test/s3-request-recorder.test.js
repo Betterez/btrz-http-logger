@@ -7,6 +7,7 @@ const os = require("node:os");
 const Module = require("node:module");
 const fsp = require("node:fs").promises;
 const fs = require("node:fs");
+const {EventEmitter} = require("node:events");
 
 const recorderPath = path.resolve(__dirname, "..", "src", "s3-request-recorder.js");
 const indexPath = path.resolve(__dirname, "..", "index.js");
@@ -59,6 +60,12 @@ function createDeferred() {
     reject = rej;
   });
   return {promise, resolve, reject};
+}
+
+function createMockRes(statusCode = 200) {
+  const res = new EventEmitter();
+  res.statusCode = statusCode;
+  return res;
 }
 
 function noopOnSignal() {}
@@ -230,6 +237,7 @@ test("calls next without waiting for append or upload", async () => {
         onSignal: noopOnSignal
       }, createTestLogger());
 
+      const res = createMockRes(200);
       mw(
         {
           method: "POST",
@@ -239,13 +247,15 @@ test("calls next without waiting for append or upload", async () => {
           headers: {"x-api-key": "secret"},
           body: {a: 1}
         },
-        {},
+        res,
         () => {
           calls.next += 1;
         }
       );
 
       assert.equal(calls.next, 1);
+      assert.equal(calls.append, 0);
+      res.emit("finish");
       await appendStarted.promise;
       assert.equal(calls.append, 1);
       assert.equal(calls.put, 0);
@@ -271,6 +281,7 @@ test("writes NDJSON with method url headers query and body when present", async 
         onSignal: noopOnSignal
       }, createTestLogger());
 
+      const res = createMockRes(200);
       mw(
         {
           method: "POST",
@@ -280,9 +291,10 @@ test("writes NDJSON with method url headers query and body when present", async 
           headers: {host: "example"},
           body: {a: 1}
         },
-        {},
+        res,
         () => {}
       );
+      res.emit("finish");
 
       const filePath = await waitForNdjsonFile(tempDir);
       const content = await fsp.readFile(filePath, "utf8");
@@ -313,6 +325,7 @@ test("parses query from url when req.query is missing", async () => {
         onSignal: noopOnSignal
       }, createTestLogger());
 
+      const res = createMockRes(200);
       mw(
         {
           method: "GET",
@@ -320,9 +333,10 @@ test("parses query from url when req.query is missing", async () => {
           path: "/v1/orders",
           headers: {}
         },
-        {},
+        res,
         () => {}
       );
+      res.emit("finish");
 
       const filePath = await waitForNdjsonFile(tempDir);
       const content = await fsp.readFile(filePath, "utf8");
@@ -347,6 +361,7 @@ test("parses query from originalUrl when req.query and url lack querystring", as
         onSignal: noopOnSignal
       }, createTestLogger());
 
+      const res = createMockRes(200);
       mw(
         {
           method: "GET",
@@ -355,9 +370,10 @@ test("parses query from originalUrl when req.query and url lack querystring", as
           path: "/v1/orders",
           headers: {}
         },
-        {},
+        res,
         () => {}
       );
+      res.emit("finish");
 
       const filePath = await waitForNdjsonFile(tempDir);
       const content = await fsp.readFile(filePath, "utf8");
@@ -382,6 +398,7 @@ test("omits body when req.body is undefined", async () => {
         onSignal: noopOnSignal
       }, createTestLogger());
 
+      const res = createMockRes(200);
       mw(
         {
           method: "GET",
@@ -390,9 +407,10 @@ test("omits body when req.body is undefined", async () => {
           query: {},
           headers: {}
         },
-        {},
+        res,
         () => {}
       );
+      res.emit("finish");
 
       const filePath = await waitForNdjsonFile(tempDir);
       const content = await fsp.readFile(filePath, "utf8");
@@ -420,6 +438,7 @@ test("calls next and omits body when req.body is circular", async () => {
       }, createTestLogger());
 
       let nextCalled = 0;
+      const res = createMockRes(200);
       mw(
         {
           method: "POST",
@@ -429,13 +448,14 @@ test("calls next and omits body when req.body is circular", async () => {
           headers: {},
           body: circular
         },
-        {},
+        res,
         () => {
           nextCalled += 1;
         }
       );
 
       assert.equal(nextCalled, 1);
+      res.emit("finish");
       const filePath = await waitForNdjsonFile(tempDir);
       const content = await fsp.readFile(filePath, "utf8");
       const record = JSON.parse(content.trim().split("\n")[0]);
@@ -501,10 +521,12 @@ test("calls next even when append fails asynchronously", async () => {
       }, logger);
 
       let nextCalled = 0;
-      mw({method: "GET", url: "/", path: "/", query: {}, headers: {}}, {}, () => {
+      const res = createMockRes(200);
+      mw({method: "GET", url: "/", path: "/", query: {}, headers: {}}, res, () => {
         nextCalled += 1;
       });
       assert.equal(nextCalled, 1);
+      res.emit("finish");
       await appendDone.promise;
       await new Promise((r) => setImmediate(r));
       assert.ok(logger.entries.some((e) => e.level === "error" && /append failed/.test(e.msg)));
@@ -530,11 +552,15 @@ test("flushes previous window to S3 and deletes temp file on success", async () 
         onSignal: noopOnSignal
       }, createTestLogger());
 
-      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
       const fileBefore = await waitForNdjsonFile(tempDir);
 
       clock.set("2026-08-11T03:30:00.000Z");
-      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       assert.equal(puts.length, 1);
@@ -568,11 +594,15 @@ test("on upload failure logs error and still deletes temp file", async () => {
         onSignal: noopOnSignal
       }, logger);
 
-      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
       const fileBefore = await waitForNdjsonFile(tempDir);
 
       clock.set("2026-08-11T03:30:00.000Z");
-      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       assert.ok(logger.entries.some((e) => e.level === "error" && (/upload failed/i.test(e.msg) || /S3 down/.test(String(e.data)))));
@@ -600,14 +630,18 @@ test("next is called before flush upload resolves", async () => {
         onSignal: noopOnSignal
       }, createTestLogger());
 
-      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
       const filePath = await waitForNdjsonFile(tempDir);
 
       clock.set("2026-08-11T03:30:00.000Z");
       let nextCalled = 0;
-      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {
         nextCalled += 1;
       });
+      res2.emit("finish");
       assert.equal(nextCalled, 1);
       uploadGate.resolve({});
     });
@@ -639,10 +673,14 @@ test("flush waits for an in-flight append before uploading", async () => {
         onSignal: noopOnSignal
       }, createTestLogger());
 
-      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
       await appendStarted.promise;
       clock.set("2026-08-11T03:30:00.000Z");
-      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(puts.length, 0);
 
@@ -670,12 +708,16 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
         onSignal: noopOnSignal
       }, createTestLogger());
 
-      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
       const filePath = await waitForNdjsonFile(tempDir);
       await fsp.writeFile(filePath, "");
 
       clock.set("2026-08-11T03:30:00.000Z");
-      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, {}, () => {});
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       assert.equal(puts.length, 0);
@@ -704,7 +746,9 @@ test("signal handler flushes current window", async () => {
         }
       }, createTestLogger());
 
-      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+      const res = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res, () => {});
+      res.emit("finish");
       const filePath = await waitForNdjsonFile(tempDir);
       assert.equal(typeof handlers.SIGTERM, "function");
       assert.equal(typeof handlers.SIGINT, "function");
@@ -712,6 +756,149 @@ test("signal handler flushes current window", async () => {
       await new Promise((r) => setTimeout(r, 50));
       assert.equal(puts.length, 1);
       assert.match(puts[0].Key, /0315-i-1\.ndjson$/);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("records status and durationMs on finish without aborted", async () => {
+  const tempDir = makeTempDir();
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
+      const {s3RequestRecorder} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "b",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: noopOnSignal
+      }, createTestLogger());
+
+      const res = createMockRes(201);
+      mw(
+        {method: "POST", url: "/x", path: "/x", query: {}, headers: {}},
+        res,
+        () => {}
+      );
+
+      const filesBefore = await listNdjsonFiles(tempDir);
+      assert.equal(filesBefore.length, 0);
+
+      clock.set("2026-08-11T03:16:00.050Z");
+      res.emit("finish");
+
+      const filePath = await waitForNdjsonFile(tempDir);
+      const record = JSON.parse((await fsp.readFile(filePath, "utf8")).trim().split("\n")[0]);
+      assert.equal(record.status, 201);
+      assert.equal(record.durationMs, 50);
+      assert.equal(Object.prototype.hasOwnProperty.call(record, "aborted"), false);
+      assert.equal(record.ts, "2026-08-11T03:16:00.000Z");
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("records aborted true on close without finish", async () => {
+  const tempDir = makeTempDir();
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
+      const {s3RequestRecorder} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "b",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: noopOnSignal
+      }, createTestLogger());
+
+      const res = createMockRes(200);
+      mw(
+        {method: "GET", url: "/slow", path: "/slow", query: {}, headers: {}},
+        res,
+        () => {}
+      );
+      clock.set("2026-08-11T03:16:01.200Z");
+      res.emit("close");
+
+      const filePath = await waitForNdjsonFile(tempDir);
+      const record = JSON.parse((await fsp.readFile(filePath, "utf8")).trim().split("\n")[0]);
+      assert.equal(record.status, 200);
+      assert.equal(record.durationMs, 1200);
+      assert.equal(record.aborted, true);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("writes only one line when finish and close both fire", async () => {
+  const tempDir = makeTempDir();
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "b",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: noopOnSignal
+      }, createTestLogger());
+
+      const res = createMockRes(204);
+      mw(
+        {method: "GET", url: "/", path: "/", query: {}, headers: {}},
+        res,
+        () => {}
+      );
+      res.emit("finish");
+      res.emit("close");
+
+      const filePath = await waitForNdjsonFile(tempDir);
+      await new Promise((r) => setTimeout(r, 20));
+      const lines = (await fsp.readFile(filePath, "utf8")).trim().split("\n").filter(Boolean);
+      assert.equal(lines.length, 1);
+      const record = JSON.parse(lines[0]);
+      assert.equal(record.status, 204);
+      assert.equal(Object.prototype.hasOwnProperty.call(record, "aborted"), false);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("defers flush of previous window until pending request finishes", async () => {
+  const tempDir = makeTempDir();
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
+      const {s3RequestRecorder, puts} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        prefix: "http-requests/sales",
+        instanceId: "i-abc123",
+        windowMinutes: 15,
+        tempDir,
+        onSignal: noopOnSignal
+      }, createTestLogger());
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      // still open — do not finish yet
+
+      clock.set("2026-08-11T03:30:00.000Z");
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.equal(puts.length, 0, "must not flush W1 while /a still pending");
+
+      res1.emit("finish");
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(puts.length, 1);
+      assert.equal(puts[0].Key, "http-requests/sales/2026/08/11/0315-i-abc123.ndjson");
+      assert.match(String(puts[0].Body), /"url":"\/a"/);
+      assert.match(String(puts[0].Body), /"status":200/);
     });
   } finally {
     await fsp.rm(tempDir, {recursive: true, force: true});
