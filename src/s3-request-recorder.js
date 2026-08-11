@@ -208,6 +208,7 @@ function s3RequestRecorder(config = {}, logger) {
   return function s3RequestRecorderMiddleware(req, res, next) {
     try {
       const now = new Date();
+      const startMs = now.getTime();
       const windowStart = getWindowStart(now, windowMinutes);
       if (activeWindowStartMs !== windowStart.getTime()) {
         if (activeWindowStartMs !== null) {
@@ -217,8 +218,35 @@ function s3RequestRecorder(config = {}, logger) {
         activeTempPath = ensureTempPath(windowStart);
       }
 
-      const line = serializeRecord(buildRecord(req, now));
-      trackAppend(activeTempPath, line);
+      const tempPath = activeTempPath;
+      const record = buildRecord(req, now);
+      let finalized = false;
+
+      function finalize(aborted) {
+        if (finalized) {
+          return;
+        }
+        finalized = true;
+        try {
+          record.status = typeof res.statusCode === "number" ? res.statusCode : 0;
+          record.durationMs = Math.max(0, new Date().getTime() - startMs);
+          if (aborted) {
+            record.aborted = true;
+          }
+          trackAppend(tempPath, serializeRecord(record));
+        } catch (err) {
+          safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder finalize failed", err);
+        }
+      }
+
+      if (res && typeof res.on === "function") {
+        res.on("finish", () => finalize(false));
+        res.on("close", () => {
+          if (!finalized) {
+            finalize(true);
+          }
+        });
+      }
     } catch (err) {
       safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder record failed", err);
     }
