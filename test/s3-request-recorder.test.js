@@ -17,6 +17,8 @@ function createDeferred() {
   return {promise, resolve, reject};
 }
 
+function noopOnSignal() {}
+
 test("s3RequestRecorder is exported from package entry", () => {
   delete require.cache[indexPath];
   delete require.cache[recorderPath];
@@ -76,6 +78,7 @@ test("calls next without waiting for append or upload", async () => {
     windowMinutes: 15,
     tempDir: "/tmp/btrz-http-logger-test",
     now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile() {
@@ -131,6 +134,7 @@ test("writes NDJSON with method url headers query and body when present", async 
     bucket: "b",
     instanceId: "i-1",
     now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(_path, data) {
@@ -181,6 +185,7 @@ test("parses query from url when req.query is missing", async () => {
     bucket: "b",
     instanceId: "i-1",
     now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(_path, data) {
@@ -223,6 +228,7 @@ test("parses query from originalUrl when req.query and url lack querystring", as
     bucket: "b",
     instanceId: "i-1",
     now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(_path, data) {
@@ -266,6 +272,7 @@ test("omits body when req.body is undefined", async () => {
     bucket: "b",
     instanceId: "i-1",
     now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(_path, data) {
@@ -295,6 +302,58 @@ test("omits body when req.body is undefined", async () => {
 
   await appendDone.promise;
   const record = JSON.parse(lines[0].trim());
+  assert.equal(Object.prototype.hasOwnProperty.call(record, "body"), false);
+});
+
+test("calls next and omits body when req.body is circular", async () => {
+  const lines = [];
+  const appendDone = createDeferred();
+  const circular = {a: 1};
+  circular.self = circular;
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    instanceId: "i-1",
+    now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
+    fs: {
+      async mkdir() {},
+      async appendFile(_path, data) {
+        lines.push(data);
+        appendDone.resolve();
+      },
+      async readFile() {
+        return "";
+      },
+      async unlink() {}
+    },
+    s3Client: {send: async () => ({})},
+    logError: () => {}
+  });
+
+  let nextCalled = 0;
+  mw(
+    {
+      method: "POST",
+      url: "/",
+      path: "/",
+      query: {},
+      headers: {},
+      body: circular
+    },
+    {},
+    () => {
+      nextCalled += 1;
+    }
+  );
+
+  assert.equal(nextCalled, 1);
+  await appendDone.promise;
+  const record = JSON.parse(lines[0].trim());
+  assert.equal(record.method, "POST");
   assert.equal(Object.prototype.hasOwnProperty.call(record, "body"), false);
 });
 
@@ -341,6 +400,7 @@ test("calls next even when append fails asynchronously", async () => {
     bucket: "b",
     instanceId: "i-1",
     now: () => new Date("2026-08-11T03:16:00.000Z"),
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile() {
@@ -381,6 +441,7 @@ test("flushes previous window to S3 and deletes temp file on success", async () 
     windowMinutes: 15,
     tempDir: "/tmp/btrz-s3-rec",
     now: () => currentNow,
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(filePath, data) {
@@ -434,6 +495,7 @@ test("on upload failure logs error and still deletes temp file", async () => {
     windowMinutes: 15,
     tempDir: "/tmp/btrz-s3-rec",
     now: () => currentNow,
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(filePath, data) {
@@ -478,6 +540,7 @@ test("next is called before flush upload resolves", async () => {
     windowMinutes: 15,
     tempDir: "/tmp/btrz-s3-rec",
     now: () => currentNow,
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile(filePath, data) {
@@ -520,6 +583,7 @@ test("flush waits for an in-flight append before uploading", async () => {
     windowMinutes: 15,
     tempDir: "/tmp/btrz-s3-rec",
     now: () => currentNow,
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile() {
@@ -562,6 +626,7 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
     windowMinutes: 15,
     tempDir: "/tmp/btrz-s3-rec",
     now: () => currentNow,
+    onSignal: noopOnSignal,
     fs: {
       async mkdir() {},
       async appendFile() {},
