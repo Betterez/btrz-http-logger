@@ -85,7 +85,9 @@ Any error during serialize is caught before `next()`; append failures are handle
   "path": "/v1/orders",
   "query": { "foo": "1" },
   "headers": { "...": "as received" },
-  "body": { "...": "..." }
+  "body": { "...": "..." },
+  "status": 201,
+  "durationMs": 42
 }
 ```
 
@@ -93,6 +95,7 @@ Any error during serialize is caught before `next()`; append failures are handle
 - `query`: `req.query` when present, else parsed from URL / empty object.
 - `body`: included **only** when `req.body !== undefined`; otherwise omit the field.
 - If `JSON.stringify` fails (e.g. circular body): omit `body` and still write the rest of the record; never fail the request.
+- `status` and `durationMs`: set when the response finishes (see `2026-08-11-s3-recorder-status-duration-design.md`). `aborted: true` only when `close` fires without `finish`.
 
 ## Temp file, window, and S3 upload
 
