@@ -105,7 +105,7 @@ Any error during serialize is caught before `next()`; append failures are handle
 - Window start is computed in UTC by flooring the current time to `windowMinutes` (e.g. with 15: `03:00`, `03:15`, `03:30`, `03:45`).
 - Flush trigger: on each request, if the computed window start differs from the active window, fire-and-forget upload the previous temp file via `PutObject`, then append the new record to a new temp file for the current window. A backup `setInterval` aligned to `windowMinutes` also flushes idle windows with pending data (so quiet periods still upload).
 - Optional best-effort flush on `SIGTERM` / `SIGINT` (still non-throwing; not awaited by request handlers).
-- After a successful upload, the local temp file for that window may be deleted (best-effort).
+- **After a successful S3 upload, delete the local temp file** for that window so disk does not fill up. Deletion is best-effort (errors logged, never thrown). Do **not** delete the temp file if upload fails (retain for a later flush/retry attempt within the process).
 
 ### S3 object key
 
@@ -146,7 +146,8 @@ Existing Morgan behavior and tests remain unchanged.
 | Missing `bucket` | No-op middleware; `next()` only |
 | Temp dir / append failure | Log asynchronously; `next()` already called |
 | Body / JSON serialize failure | Record without `body`; `next()` |
-| S3 `PutObject` failure | Log asynchronously; request already continued |
+| S3 `PutObject` failure | Log asynchronously; keep temp file for retry; request already continued |
+| Temp file delete after success | Log if delete fails; request unaffected |
 | Unexpected throw in middleware | Catch; `next()` |
 
 ## Testing strategy (TDD-first)
@@ -165,8 +166,9 @@ Implementation order is strictly:
 4. Includes `body` only when `req.body` is present.
 5. Builds S3 key from window start + `instanceId` (UTC).
 6. Flushes/uploads on window boundary.
-7. Returns no-op when `bucket` is missing.
-8. Existing Morgan tests in `test/index.test.js` still pass.
+7. Deletes the local temp file after a successful upload; keeps it when upload fails.
+8. Returns no-op when `bucket` is missing.
+9. Existing Morgan tests in `test/index.test.js` still pass.
 
 Mocks: inject `s3Client` (or mock `@aws-sdk/client-s3`), mock/stub filesystem as needed, fake timers for window boundaries.
 
