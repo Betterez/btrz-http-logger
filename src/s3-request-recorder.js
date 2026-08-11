@@ -133,6 +133,11 @@ function s3RequestRecorder(config = {}, logger) {
   let activeTempPath = null;
   const inFlightAppends = new Map();
 
+  // Ensure once at setup; do not mkdir on every request append.
+  const tempDirReady = fsp.mkdir(tempDir, {recursive: true}).catch((err) => {
+    safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder tempDir mkdir failed", err);
+  });
+
   function ensureTempPath(windowStart) {
     const stamp = windowStart.toISOString().replace(/[:.]/g, "-");
     return path.join(tempDir, `btrz-http-logger-${instanceId}-${stamp}.ndjson`);
@@ -141,7 +146,7 @@ function s3RequestRecorder(config = {}, logger) {
   function trackAppend(filePath, line) {
     const previousAppend = inFlightAppends.get(filePath) || Promise.resolve();
     const append = previousAppend
-      .then(() => fsp.mkdir(tempDir, {recursive: true}))
+      .then(() => tempDirReady)
       .then(() => fsp.appendFile(filePath, line, "utf8"))
       .catch((err) => {
         safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder append failed", err);
