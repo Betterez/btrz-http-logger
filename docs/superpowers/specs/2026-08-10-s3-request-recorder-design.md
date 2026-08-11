@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-10  
 **Repo:** `btrz-http-logger`  
-**Status:** Draft written — awaiting user review before implementation plan
+**Status:** Implemented
 
 ## Goal
 
