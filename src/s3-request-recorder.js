@@ -5,13 +5,40 @@ const path = require("path");
 const fsp = require("fs").promises;
 const {S3Client} = require("@aws-sdk/client-s3");
 
+function parseQueryFromUrl(url) {
+  if (!url || typeof url !== "string") {
+    return {};
+  }
+  const qIndex = url.indexOf("?");
+  if (qIndex === -1) {
+    return {};
+  }
+  const params = new URLSearchParams(url.slice(qIndex + 1));
+  const query = {};
+  for (const [key, value] of params) {
+    query[key] = value;
+  }
+  return query;
+}
+
+function resolveQuery(req) {
+  if (req.query && typeof req.query === "object") {
+    return req.query;
+  }
+  const urlQuery = parseQueryFromUrl(req.url);
+  if (Object.keys(urlQuery).length > 0) {
+    return urlQuery;
+  }
+  return parseQueryFromUrl(req.originalUrl);
+}
+
 function buildRecord(req, now) {
   const record = {
     ts: now.toISOString(),
     method: req.method,
     url: req.url || req.originalUrl || "",
     path: req.path || (req.url || "").split("?")[0] || "",
-    query: req.query && typeof req.query === "object" ? req.query : {},
+    query: resolveQuery(req),
     headers: req.headers || {}
   };
 

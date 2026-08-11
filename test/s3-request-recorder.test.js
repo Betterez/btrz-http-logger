@@ -170,6 +170,91 @@ test("writes NDJSON with method url headers query and body when present", async 
   assert.equal(record.ts, "2026-08-11T03:16:00.000Z");
 });
 
+test("parses query from url when req.query is missing", async () => {
+  const lines = [];
+  const appendDone = createDeferred();
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    instanceId: "i-1",
+    now: () => new Date("2026-08-11T03:16:00.000Z"),
+    fs: {
+      async mkdir() {},
+      async appendFile(_path, data) {
+        lines.push(data);
+        appendDone.resolve();
+      },
+      async readFile() {
+        return "";
+      },
+      async unlink() {}
+    },
+    s3Client: {send: async () => ({})},
+    logError: () => {}
+  });
+
+  mw(
+    {
+      method: "GET",
+      url: "/v1/orders?foo=1",
+      path: "/v1/orders",
+      headers: {}
+    },
+    {},
+    () => {}
+  );
+
+  await appendDone.promise;
+  const record = JSON.parse(lines[0].trim());
+  assert.deepEqual(record.query, {foo: "1"});
+});
+
+test("parses query from originalUrl when req.query and url lack querystring", async () => {
+  const lines = [];
+  const appendDone = createDeferred();
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+
+  const mw = s3RequestRecorder({
+    bucket: "b",
+    instanceId: "i-1",
+    now: () => new Date("2026-08-11T03:16:00.000Z"),
+    fs: {
+      async mkdir() {},
+      async appendFile(_path, data) {
+        lines.push(data);
+        appendDone.resolve();
+      },
+      async readFile() {
+        return "";
+      },
+      async unlink() {}
+    },
+    s3Client: {send: async () => ({})},
+    logError: () => {}
+  });
+
+  mw(
+    {
+      method: "GET",
+      url: "/v1/orders",
+      originalUrl: "/v1/orders?bar=2",
+      path: "/v1/orders",
+      headers: {}
+    },
+    {},
+    () => {}
+  );
+
+  await appendDone.promise;
+  const record = JSON.parse(lines[0].trim());
+  assert.deepEqual(record.query, {bar: "2"});
+});
+
 test("omits body when req.body is undefined", async () => {
   const lines = [];
   const appendDone = createDeferred();
