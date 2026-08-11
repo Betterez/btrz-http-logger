@@ -12,12 +12,14 @@ const {EventEmitter} = require("node:events");
 const recorderPath = path.resolve(__dirname, "..", "src", "s3-request-recorder.js");
 const indexPath = path.resolve(__dirname, "..", "index.js");
 
-function loadRecorderModule({send} = {}) {
+function loadRecorderModule({send, get} = {}) {
   const puts = [];
   const originalLoad = Module._load;
-  const sendFn = send || (async (command) => {
-    puts.push(command.input || command);
-    return {};
+  const sendFn = send || (async () => ({}));
+  const getFn = get || (async () => {
+    const err = new Error("NoSuchKey");
+    err.name = "NoSuchKey";
+    throw err;
   });
 
   Module._load = function patchedModuleLoad(request, parent, isMain) {
@@ -25,10 +27,19 @@ function loadRecorderModule({send} = {}) {
       return {
         S3Client: class MockS3Client {
           send(command) {
+            if (command.constructor.name === "GetObjectCommand") {
+              return getFn(command);
+            }
+            puts.push(command.input || command);
             return sendFn(command);
           }
         },
-        PutObjectCommand: class MockPutObjectCommand {
+        PutObjectCommand: class PutObjectCommand {
+          constructor(input) {
+            this.input = input;
+          }
+        },
+        GetObjectCommand: class GetObjectCommand {
           constructor(input) {
             this.input = input;
           }
@@ -817,6 +828,14 @@ test("signal flush isolates a request that starts during sealed S3 send", async 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder} = loadRecorderModule({
+        get: async () => {
+          if (uploads.length === 0) {
+            const err = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            throw err;
+          }
+          return {Body: uploads[uploads.length - 1].Body};
+        },
         send: async (command) => {
           uploads.push(command.input);
           if (uploads.length === 1) {
@@ -861,7 +880,7 @@ test("signal flush isolates a request that starts during sealed S3 send", async 
       assert.match(await waitForFile(filePath), /"url":"\/b"/);
       const finalUpload = await secondSend.promise;
 
-      assert.doesNotMatch(String(finalUpload.Body), /"url":"\/a"/);
+      assert.match(String(finalUpload.Body), /"url":"\/a"/);
       assert.match(String(finalUpload.Body), /"url":"\/b"/);
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(fs.existsSync(filePath), false);
@@ -882,6 +901,14 @@ test("signal flush preserves a request that fully finalizes during sealed S3 sen
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
       const {s3RequestRecorder} = loadRecorderModule({
+        get: async () => {
+          if (uploads.length === 0) {
+            const err = new Error("NoSuchKey");
+            err.name = "NoSuchKey";
+            throw err;
+          }
+          return {Body: uploads[uploads.length - 1].Body};
+        },
         send: async (command) => {
           uploads.push(command.input);
           if (uploads.length === 1) {
@@ -927,7 +954,7 @@ test("signal flush preserves a request that fully finalizes during sealed S3 sen
       handlers.SIGTERM();
       const finalUpload = await secondSend.promise;
 
-      assert.doesNotMatch(String(finalUpload.Body), /"url":"\/a"/);
+      assert.match(String(finalUpload.Body), /"url":"\/a"/);
       assert.match(String(finalUpload.Body), /"url":"\/b"/);
       assert.match(String(finalUpload.Body), /"status":201/);
       await new Promise((resolve) => setTimeout(resolve, 30));

@@ -3,7 +3,7 @@
 const os = require("os");
 const path = require("path");
 const fsp = require("fs").promises;
-const {PutObjectCommand, S3Client} = require("@aws-sdk/client-s3");
+const {GetObjectCommand, PutObjectCommand, S3Client} = require("@aws-sdk/client-s3");
 
 function parseQueryFromUrl(url) {
   if (!url || typeof url !== "string") {
@@ -92,6 +92,40 @@ function safelyLog(logger, level, message, data) {
       logger[level](message, data);
     }
   } catch (_err) {}
+}
+
+function isS3ObjectNotFound(err) {
+  return Boolean(
+    err &&
+    (err.name === "NoSuchKey" ||
+      err.code === "NoSuchKey" ||
+      err.statusCode === 404 ||
+      (err.$metadata && err.$metadata.httpStatusCode === 404))
+  );
+}
+
+async function bodyToBuffer(body) {
+  if (!body) {
+    return Buffer.alloc(0);
+  }
+  if (Buffer.isBuffer(body)) {
+    return body;
+  }
+  if (typeof body === "string" || body instanceof Uint8Array) {
+    return Buffer.from(body);
+  }
+  if (typeof body.transformToByteArray === "function") {
+    return Buffer.from(await body.transformToByteArray());
+  }
+  if (typeof body.transformToString === "function") {
+    return Buffer.from(await body.transformToString(), "utf8");
+  }
+
+  const chunks = [];
+  for await (const chunk of body) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 /**
@@ -210,11 +244,26 @@ function s3RequestRecorder(config = {}, logger) {
         try {
           const body = await fsp.readFile(sealedPath);
           if (body && body.length) {
+            const key = buildS3Key({prefix, windowStart, instanceId});
+            let existingBody = Buffer.alloc(0);
+            try {
+              const existingObject = await s3Client.send(
+                new GetObjectCommand({
+                  Bucket: bucket,
+                  Key: key
+                })
+              );
+              existingBody = await bodyToBuffer(existingObject.Body);
+            } catch (err) {
+              if (!isS3ObjectNotFound(err)) {
+                throw err;
+              }
+            }
             await s3Client.send(
               new PutObjectCommand({
                 Bucket: bucket,
-                Key: buildS3Key({prefix, windowStart, instanceId}),
-                Body: body,
+                Key: key,
+                Body: Buffer.concat([existingBody, body]),
                 ContentType: "application/x-ndjson"
               })
             );
