@@ -148,3 +148,5 @@ module.exports = function _default(app, stream, name, config = {}) {
     }));
   }
 };
+
+module.exports.s3RequestRecorder = require("./src/s3-request-recorder").s3RequestRecorder;
