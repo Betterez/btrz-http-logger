@@ -805,6 +805,69 @@ test("signal flush waits for a new same-window request to finish", async () => {
   }
 });
 
+test("signal flush does not delete file when request starts during S3 send", async () => {
+  const handlers = {};
+  const sendStarted = createDeferred();
+  const firstSendGate = createDeferred();
+  const firstSendFinished = createDeferred();
+  const secondSend = createDeferred();
+  const uploads = [];
+  const tempDir = makeTempDir();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder} = loadRecorderModule({
+        send: async (command) => {
+          uploads.push(command.input);
+          if (uploads.length === 1) {
+            sendStarted.resolve();
+            await firstSendGate.promise;
+            firstSendFinished.resolve();
+          } else {
+            secondSend.resolve(command.input);
+          }
+          return {};
+        }
+      });
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        windowMinutes: 15,
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, createTestLogger());
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      const filePath = await waitForNdjsonFile(tempDir);
+
+      handlers.SIGTERM();
+      await sendStarted.promise;
+
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      firstSendGate.resolve();
+      await firstSendFinished.promise;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      assert.equal(fs.existsSync(filePath), true, "must not delete while request is pending");
+
+      res2.emit("finish");
+      const finalUpload = await secondSend.promise;
+
+      assert.match(String(finalUpload.Body), /"url":"\/a"/);
+      assert.match(String(finalUpload.Body), /"url":"\/b"/);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(fs.existsSync(filePath), false);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
 test("throwing response listener registration does not strand pending flush", async () => {
   const handlers = {};
   const tempDir = makeTempDir();

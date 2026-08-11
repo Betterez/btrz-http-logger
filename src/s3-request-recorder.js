@@ -160,34 +160,52 @@ function s3RequestRecorder(config = {}, logger) {
     });
   }
 
+  function deferFlushForPending(filePath, windowStart) {
+    if ((pendingFinalizers.get(filePath) || 0) === 0) {
+      return false;
+    }
+    flushWhenIdle.set(filePath, windowStart);
+    return true;
+  }
+
   function flushFile(filePath, windowStart) {
     const work = Promise.resolve().then(async () => {
       await (inFlightAppends.get(filePath) || Promise.resolve());
-      if ((pendingFinalizers.get(filePath) || 0) > 0) {
-        flushWhenIdle.set(filePath, windowStart);
+      if (deferFlushForPending(filePath, windowStart)) {
         return;
       }
 
       try {
         const body = await fsp.readFile(filePath);
-        if (!body || !body.length) {
+        if (deferFlushForPending(filePath, windowStart)) {
           return;
         }
-        await s3Client.send(
-          new PutObjectCommand({
-            Bucket: bucket,
-            Key: buildS3Key({prefix, windowStart, instanceId}),
-            Body: body,
-            ContentType: "application/x-ndjson"
-          })
-        );
+        if (body && body.length) {
+          await s3Client.send(
+            new PutObjectCommand({
+              Bucket: bucket,
+              Key: buildS3Key({prefix, windowStart, instanceId}),
+              Body: body,
+              ContentType: "application/x-ndjson"
+            })
+          );
+          if (deferFlushForPending(filePath, windowStart)) {
+            return;
+          }
+        }
       } catch (err) {
+        if (deferFlushForPending(filePath, windowStart)) {
+          return;
+        }
         safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder S3 upload failed", err);
-      } finally {
-        await fsp.unlink(filePath).catch((err) => {
-          safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
-        });
       }
+
+      if (deferFlushForPending(filePath, windowStart)) {
+        return;
+      }
+      await fsp.unlink(filePath).catch((err) => {
+        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
+      });
     });
 
     work.catch(() => {});
