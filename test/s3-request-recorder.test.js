@@ -14,6 +14,7 @@ const indexPath = path.resolve(__dirname, "..", "index.js");
 
 function loadRecorderModule({send, get} = {}) {
   const puts = [];
+  const gets = [];
   const originalLoad = Module._load;
   const sendFn = send || (async () => ({}));
   const getFn = get || (async () => {
@@ -28,6 +29,7 @@ function loadRecorderModule({send, get} = {}) {
         S3Client: class MockS3Client {
           send(command) {
             if (command.constructor.name === "GetObjectCommand") {
+              gets.push(command.input || command);
               return getFn(command);
             }
             puts.push(command.input || command);
@@ -56,7 +58,8 @@ function loadRecorderModule({send, get} = {}) {
       s3RequestRecorder: mod.s3RequestRecorder,
       buildS3Key: mod.buildS3Key,
       getWindowStart: mod.getWindowStart,
-      puts
+      puts,
+      gets
     };
   } finally {
     Module._load = originalLoad;
@@ -318,6 +321,42 @@ test("writes NDJSON with method url headers query and body when present", async 
       assert.deepEqual(record.headers, {host: "example"});
       assert.deepEqual(record.body, {a: 1});
       assert.equal(record.ts, "2026-08-11T03:16:00.000Z");
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("snapshots request body before next mutates it", async () => {
+  const tempDir = makeTempDir();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "b",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: noopOnSignal
+      }, createTestLogger());
+      const req = {
+        method: "POST",
+        url: "/v1/orders",
+        path: "/v1/orders",
+        query: {},
+        headers: {},
+        body: {state: "original"}
+      };
+      const res = createMockRes(200);
+
+      mw(req, res, () => {
+        req.body.state = "mutated";
+      });
+      res.emit("finish");
+
+      const filePath = await waitForNdjsonFile(tempDir);
+      const record = JSON.parse((await fsp.readFile(filePath, "utf8")).trim());
+      assert.deepEqual(record.body, {state: "original"});
     });
   } finally {
     await fsp.rm(tempDir, {recursive: true, force: true});
@@ -774,13 +813,20 @@ test("signal handler flushes current window", async () => {
   }
 });
 
-test("signal flush waits for a new same-window request to finish", async () => {
+test("signal flush uploads appended data while an open request can record afterward", async () => {
   const handlers = {};
   const tempDir = makeTempDir();
+  const uploads = [];
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      const {s3RequestRecorder, puts} = loadRecorderModule();
+      const {s3RequestRecorder} = loadRecorderModule({
+        get: async () => ({Body: uploads[uploads.length - 1].Body}),
+        send: async (command) => {
+          uploads.push(command.input);
+          return {};
+        }
+      });
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
         instanceId: "i-1",
@@ -796,20 +842,181 @@ test("signal flush waits for a new same-window request to finish", async () => {
       res1.emit("finish");
       const filePath = await waitForNdjsonFile(tempDir);
 
-      handlers.SIGTERM();
       const res2 = createMockRes(200);
       mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      handlers.SIGTERM();
       await new Promise((r) => setTimeout(r, 30));
 
-      assert.equal(puts.length, 0, "must not flush while same-window request is pending");
-      assert.equal(fs.existsSync(filePath), true);
+      assert.equal(uploads.length, 1, "must flush already-appended data despite pending request");
+      assert.match(String(uploads[0].Body), /"url":"\/a"/);
+      assert.doesNotMatch(String(uploads[0].Body), /"url":"\/b"/);
 
       res2.emit("finish");
       await new Promise((r) => setTimeout(r, 30));
 
-      assert.equal(puts.length, 1);
-      assert.match(String(puts[0].Body), /"url":"\/a"/);
-      assert.match(String(puts[0].Body), /"url":"\/b"/);
+      assert.equal(uploads.length, 2);
+      assert.match(String(uploads[1].Body), /"url":"\/a"/);
+      assert.match(String(uploads[1].Body), /"url":"\/b"/);
+      assert.equal(fs.existsSync(filePath), false);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("skips GetObject on first upload and merges subsequent partial flush", async () => {
+  const handlers = {};
+  const uploads = [];
+  const tempDir = makeTempDir();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder, gets} = loadRecorderModule({
+        get: async () => ({Body: uploads[uploads.length - 1].Body}),
+        send: async (command) => {
+          uploads.push(command.input);
+          return {};
+        }
+      });
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, createTestLogger());
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(uploads.length, 1);
+      assert.equal(gets.length, 0);
+
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(gets.length, 1);
+      assert.equal(uploads.length, 2);
+      assert.match(String(uploads[1].Body), /"url":"\/a"/);
+      assert.match(String(uploads[1].Body), /"url":"\/b"/);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("GetObject failure still puts sealed body and deletes it on success", async () => {
+  const handlers = {};
+  const uploads = [];
+  const tempDir = makeTempDir();
+  const logger = createTestLogger();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      let denyGet = false;
+      const {s3RequestRecorder} = loadRecorderModule({
+        get: async () => {
+          if (denyGet) {
+            throw new Error("AccessDenied");
+          }
+          return {Body: uploads[uploads.length - 1].Body};
+        },
+        send: async (command) => {
+          uploads.push(command.input);
+          return {};
+        }
+      });
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, logger);
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      denyGet = true;
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(uploads.length, 2);
+      assert.doesNotMatch(String(uploads[1].Body), /"url":"\/a"/);
+      assert.match(String(uploads[1].Body), /"url":"\/b"/);
+      assert.ok(logger.entries.some((entry) => /GetObject failed/.test(entry.msg)));
+      assert.equal((await fsp.readdir(tempDir)).some((name) => name.endsWith(".uploading")), false);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("preserves sealed file when GetObject and PutObject both fail", async () => {
+  const handlers = {};
+  const tempDir = makeTempDir();
+  const logger = createTestLogger();
+  let putCount = 0;
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder} = loadRecorderModule({
+        get: async () => {
+          throw new Error("AccessDenied");
+        },
+        send: async () => {
+          putCount += 1;
+          if (putCount > 1) {
+            throw new Error("Put denied");
+          }
+          return {};
+        }
+      });
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, logger);
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
+      await waitForNdjsonFile(tempDir);
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      const sealed = (await fsp.readdir(tempDir)).find((name) => name.endsWith(".uploading"));
+      assert.ok(sealed, "sealed data must remain available for recovery");
+      assert.match(await fsp.readFile(path.join(tempDir, sealed), "utf8"), /"url":"\/b"/);
+      assert.ok(logger.entries.some((entry) => /preserved sealed temp file/.test(entry.msg)));
     });
   } finally {
     await fsp.rm(tempDir, {recursive: true, force: true});

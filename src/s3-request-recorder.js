@@ -50,6 +50,28 @@ function buildRecord(req, now) {
   return record;
 }
 
+function snapshotRecord(req, now) {
+  const record = buildRecord(req, now);
+  try {
+    return JSON.parse(JSON.stringify(record));
+  } catch (_err) {
+    const withoutBody = buildRecord(req, now);
+    delete withoutBody.body;
+    try {
+      return JSON.parse(JSON.stringify(withoutBody));
+    } catch (_fallbackErr) {
+      return {
+        ts: now.toISOString(),
+        method: req.method,
+        url: req.url || req.originalUrl || "",
+        path: req.path || (req.url || "").split("?")[0] || "",
+        query: {},
+        headers: {}
+      };
+    }
+  }
+}
+
 function serializeRecord(record) {
   try {
     return `${JSON.stringify(record)}\n`;
@@ -171,6 +193,7 @@ function s3RequestRecorder(config = {}, logger) {
   const flushWhenIdle = new Map();
   const pathEpoch = new Map();
   const flushChains = new Map();
+  const uploadedKeys = new Set();
   let sealedFileSequence = 0;
 
   fsp.mkdir(tempDir, {recursive: true}).catch((err) => {
@@ -207,31 +230,39 @@ function s3RequestRecorder(config = {}, logger) {
     return pending > 0 ? "pending" : "stale";
   }
 
-  function flushFile(filePath, windowStart) {
+  function flushFile(filePath, windowStart, forceSeal = false) {
     const previousFlush = flushChains.get(filePath) || Promise.resolve();
     const work = previousFlush.catch(() => {}).then(async () => {
       while (true) {
         const epoch = pathEpoch.get(filePath) || 0;
 
         await (inFlightAppends.get(filePath) || Promise.resolve());
-        let changedState = deferFlushForChangedState(filePath, windowStart, epoch);
-        if (changedState === "pending") {
-          return;
-        }
-        if (changedState === "stale") {
-          continue;
-        }
+        if (forceSeal) {
+          if ((pendingFinalizers.get(filePath) || 0) > 0) {
+            flushWhenIdle.set(filePath, windowStart);
+          }
+        } else {
+          let changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+          if (changedState === "pending") {
+            return;
+          }
+          if (changedState === "stale") {
+            continue;
+          }
 
-        changedState = deferFlushForChangedState(filePath, windowStart, epoch);
-        if (changedState === "pending") {
-          return;
-        }
-        if (changedState === "stale") {
-          continue;
+          changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+          if (changedState === "pending") {
+            return;
+          }
+          if (changedState === "stale") {
+            continue;
+          }
         }
 
         const sealedPath = `${filePath}.${process.pid}.${Date.now()}.${sealedFileSequence++}.uploading`;
-        flushWhenIdle.delete(filePath);
+        if (!forceSeal || (pendingFinalizers.get(filePath) || 0) === 0) {
+          flushWhenIdle.delete(filePath);
+        }
         // renameSync must run immediately after the last synchronous pending/epoch check
         // with no await in between, so finalize cannot append to the pre-seal path during seal.
         try {
@@ -244,39 +275,65 @@ function s3RequestRecorder(config = {}, logger) {
           return;
         }
 
+        let preserveSealed = false;
         try {
           const body = await fsp.readFile(sealedPath);
           if (body && body.length) {
             const key = buildS3Key({prefix, windowStart, instanceId});
             let existingBody = Buffer.alloc(0);
-            try {
-              const existingObject = await s3Client.send(
-                new GetObjectCommand({
-                  Bucket: bucket,
-                  Key: key
-                })
-              );
-              existingBody = await bodyToBuffer(existingObject.Body);
-            } catch (err) {
-              if (!isS3ObjectNotFound(err)) {
-                throw err;
+            let mergeGetFailed = false;
+            if (uploadedKeys.has(key)) {
+              // Subsequent partial flushes require s3:GetObject on the bucket to merge.
+              try {
+                const existingObject = await s3Client.send(
+                  new GetObjectCommand({
+                    Bucket: bucket,
+                    Key: key
+                  })
+                );
+                existingBody = await bodyToBuffer(existingObject.Body);
+              } catch (err) {
+                if (!isS3ObjectNotFound(err)) {
+                  mergeGetFailed = true;
+                  safelyLog(
+                    logger,
+                    "error",
+                    "[btrz-http-logger] s3RequestRecorder GetObject failed; uploading sealed body without merge",
+                    err
+                  );
+                }
               }
             }
-            await s3Client.send(
-              new PutObjectCommand({
-                Bucket: bucket,
-                Key: key,
-                Body: Buffer.concat([existingBody, body]),
-                ContentType: "application/x-ndjson"
-              })
-            );
+            try {
+              await s3Client.send(
+                new PutObjectCommand({
+                  Bucket: bucket,
+                  Key: key,
+                  Body: Buffer.concat([existingBody, body]),
+                  ContentType: "application/x-ndjson"
+                })
+              );
+              uploadedKeys.add(key);
+            } catch (err) {
+              preserveSealed = mergeGetFailed;
+              throw err;
+            }
           }
         } catch (err) {
           safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder S3 upload failed", err);
         } finally {
-          await fsp.unlink(sealedPath).catch((err) => {
-            safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
-          });
+          if (preserveSealed) {
+            safelyLog(
+              logger,
+              "error",
+              "[btrz-http-logger] s3RequestRecorder preserved sealed temp file after merge and upload failures",
+              {sealedPath}
+            );
+          } else {
+            await fsp.unlink(sealedPath).catch((err) => {
+              safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
+            });
+          }
         }
         if ((pendingFinalizers.get(filePath) || 0) === 0) {
           pathEpoch.delete(filePath);
@@ -343,7 +400,7 @@ function s3RequestRecorder(config = {}, logger) {
     const windowStart = new Date(activeWindowStartMs);
     activeTempPath = null;
     activeWindowStartMs = null;
-    scheduleFlush(filePath, windowStart);
+    flushFile(filePath, windowStart, true);
   }
 
   try {
@@ -365,7 +422,7 @@ function s3RequestRecorder(config = {}, logger) {
       }
 
       const tempPath = activeTempPath;
-      const record = buildRecord(req, now);
+      const record = snapshotRecord(req, now);
       let finalized = false;
 
       function finalize(aborted) {

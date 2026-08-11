@@ -112,9 +112,9 @@ Any error during serialize is caught before `next()`; append failures are handle
 - Window start is computed in UTC by flooring the current time to `windowMinutes` (e.g. with 15: `03:00`, `03:15`, `03:30`, `03:45`).
 - **No `setInterval` / timers.** Flush is event-driven only:
   1. **On request, window rolled:** if the computed window start differs from the active window, fire-and-forget upload the previous temp file via `PutObject`, then schedule append of the new record to a new temp file for the current window.
-  2. **On `SIGTERM` / `SIGINT`:** best-effort flush of the current window (still non-throwing; not awaited by request handlers).
+  2. **On `SIGTERM` / `SIGINT`:** force-seal and best-effort flush whatever has already been appended in the current window, even when requests are still open. Late finalizers append to the recreated live path and trigger a later merge flush.
 - Trade-off: if traffic stops inside a window, that window’s file uploads on the next request after the window rolls, or on process shutdown — not on a timer.
-- **Always delete the local temp file after an upload attempt completes** (success or failure), so disk does not fill up. On failure: log the error, then delete. Deletion is best-effort (delete errors logged, never thrown). No retry / pending-upload list.
+- Delete the sealed local temp file after a successful upload. Preserve it only when a non-404 merge `GetObject` failure is followed by a `PutObject` failure, avoiding silent data loss when merge IAM is unavailable; other failed upload attempts retain the original delete-after-attempt behavior.
 
 ### S3 object key
 
@@ -135,7 +135,7 @@ Example: `http-requests/sales/2026/08/11/0315-i-abc123.ndjson`
 - Rejected appends/uploads are caught and logged; never rethrown to Express.
 - Request latency must not include disk append time or S3 round-trip time.
 - Before uploading a window file, wait for in-flight appends for that file to settle (internal tracking), so the uploaded object is not truncated — this coordination happens only on the flush path, never on `next()`.
-- After the upload attempt finishes (resolve or reject), delete the temp file; on reject, log first, then delete.
+- The first upload to a key skips `GetObject`. Subsequent partial flushes use `GetObject` to merge and therefore require `s3:GetObject`; a non-404 get failure is logged and the sealed body is still put alone.
 
 ## Module layout
 
@@ -156,7 +156,7 @@ Existing Morgan behavior and tests remain unchanged.
 | Missing `bucket` or missing `logger` argument | No-op middleware; `next()` only (`logger.error` once if logger present but bucket missing) |
 | Temp dir / append failure | `logger.error` asynchronously; `next()` already called |
 | Body / JSON serialize failure | Record without `body`; `next()` |
-| S3 `PutObject` failure | `logger.error` asynchronously; delete temp file anyway; request already continued |
+| S3 `PutObject` failure | `logger.error` asynchronously; preserve the sealed file only when a preceding non-404 merge get also failed, otherwise delete after the attempt |
 | Temp file delete after upload attempt | `logger.error` if delete fails; request unaffected |
 | Unexpected throw in middleware | Catch; `logger.error`; `next()` |
 
