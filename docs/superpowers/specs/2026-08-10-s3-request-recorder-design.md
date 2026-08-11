@@ -60,9 +60,9 @@ Signature: `s3RequestRecorder(config, logger)`.
 |----------|----------|-------|
 | `logger` | yes | Second argument: `btrz-logger` `Logger` instance. Uses `logger.error(msg)` / `logger.error(msg, err)`. Missing logger → silent no-op |
 
-Do **not** inject `fs`, `now`, `warn`, `logError`, or `logger` via config. Always use `fs.promises` and `new Date()`. Logging goes through the `logger` argument.
+Do **not** inject `fs`, `now`, `warn`, `logError`, `logger`, or `s3Client` via config. Always use `fs.promises`, `new Date()`, and an internally constructed `@aws-sdk/client-s3` `S3Client` (region from config when provided). Logging goes through the `logger` argument.
 
-Credentials use the default AWS SDK credential chain (or an optional test-only `s3Client` if provided by the consumer for tests).
+Credentials use the default AWS SDK credential chain.
 
 ## Request path behavior
 

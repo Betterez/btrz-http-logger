@@ -4,11 +4,52 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const os = require("node:os");
+const Module = require("node:module");
 const fsp = require("node:fs").promises;
 const fs = require("node:fs");
 
 const recorderPath = path.resolve(__dirname, "..", "src", "s3-request-recorder.js");
 const indexPath = path.resolve(__dirname, "..", "index.js");
+
+function loadRecorderModule({send} = {}) {
+  const puts = [];
+  const originalLoad = Module._load;
+  const sendFn = send || (async (command) => {
+    puts.push(command.input || command);
+    return {};
+  });
+
+  Module._load = function patchedModuleLoad(request, parent, isMain) {
+    if (request === "@aws-sdk/client-s3") {
+      return {
+        S3Client: class MockS3Client {
+          send(command) {
+            return sendFn(command);
+          }
+        },
+        PutObjectCommand: class MockPutObjectCommand {
+          constructor(input) {
+            this.input = input;
+          }
+        }
+      };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  try {
+    delete require.cache[recorderPath];
+    const mod = require("../src/s3-request-recorder");
+    return {
+      s3RequestRecorder: mod.s3RequestRecorder,
+      buildS3Key: mod.buildS3Key,
+      getWindowStart: mod.getWindowStart,
+      puts
+    };
+  } finally {
+    Module._load = originalLoad;
+  }
+}
 
 function createDeferred() {
   let resolve;
@@ -174,21 +215,19 @@ test("calls next without waiting for append or upload", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder} = loadRecorderModule({
+        send: async () => {
+          calls.put += 1;
+          await putFinished.promise;
+          return {};
+        }
+      });
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {
-          send: async () => {
-            calls.put += 1;
-            await putFinished.promise;
-            return {};
-          }
-        }
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw(
@@ -224,14 +263,12 @@ test("writes NDJSON with method url headers query and body when present", async 
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {send: async () => ({})}
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw(
@@ -268,14 +305,12 @@ test("parses query from url when req.query is missing", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {send: async () => ({})}
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw(
@@ -304,14 +339,12 @@ test("parses query from originalUrl when req.query and url lack querystring", as
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {send: async () => ({})}
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw(
@@ -341,14 +374,12 @@ test("omits body when req.body is undefined", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {send: async () => ({})}
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw(
@@ -380,14 +411,12 @@ test("calls next and omits body when req.body is circular", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {send: async () => ({})}
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       let nextCalled = 0;
@@ -463,14 +492,12 @@ test("calls next even when append fails asynchronously", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {send: async () => ({})}
+        onSignal: noopOnSignal
       }, logger);
 
       let nextCalled = 0;
@@ -489,26 +516,18 @@ test("calls next even when append fails asynchronously", async () => {
 });
 
 test("flushes previous window to S3 and deletes temp file on success", async () => {
-  const puts = [];
   const tempDir = makeTempDir();
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
         prefix: "http-requests/sales",
         instanceId: "i-abc123",
         windowMinutes: 15,
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {
-          send: async (command) => {
-            puts.push(command.input || command);
-            return {};
-          }
-        }
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
@@ -536,19 +555,17 @@ test("on upload failure logs error and still deletes temp file", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder} = loadRecorderModule({
+        send: async () => {
+          throw new Error("S3 down");
+        }
+      });
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {
-          send: async () => {
-            throw new Error("S3 down");
-          }
-        }
+        onSignal: noopOnSignal
       }, logger);
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
@@ -572,17 +589,15 @@ test("next is called before flush upload resolves", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder} = loadRecorderModule({
+        send: async () => uploadGate.promise
+      });
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {
-          send: async () => uploadGate.promise
-        }
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
@@ -604,7 +619,6 @@ test("next is called before flush upload resolves", async () => {
 test("flush waits for an in-flight append before uploading", async () => {
   const appendStarted = createDeferred();
   const appendFinished = createDeferred();
-  const puts = [];
   const tempDir = makeTempDir();
   const originalAppend = fsp.appendFile;
 
@@ -616,17 +630,13 @@ test("flush waits for an in-flight append before uploading", async () => {
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {
-          send: async (command) => puts.push(command.input || command)
-        }
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
@@ -647,22 +657,17 @@ test("flush waits for an in-flight append before uploading", async () => {
 });
 
 test("skips S3 upload for an empty previous file but deletes it", async () => {
-  const puts = [];
   const tempDir = makeTempDir();
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
       const mw = s3RequestRecorder({
         bucket: "b",
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
-        onSignal: noopOnSignal,
-        s3Client: {
-          send: async (command) => puts.push(command.input || command)
-        }
+        onSignal: noopOnSignal
       }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
@@ -683,13 +688,11 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
 
 test("signal handler flushes current window", async () => {
   const handlers = {};
-  const puts = [];
   const tempDir = makeTempDir();
 
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
-      delete require.cache[recorderPath];
-      const {s3RequestRecorder} = require("../src/s3-request-recorder");
+      const {s3RequestRecorder, puts} = loadRecorderModule();
 
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
@@ -698,12 +701,6 @@ test("signal handler flushes current window", async () => {
         tempDir,
         onSignal: (event, handler) => {
           handlers[event] = handler;
-        },
-        s3Client: {
-          send: async (command) => {
-            puts.push(command.input || command);
-            return {};
-          }
         }
       }, createTestLogger());
 

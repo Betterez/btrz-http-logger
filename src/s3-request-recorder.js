@@ -102,7 +102,6 @@ function safelyLog(logger, level, message, data) {
  * @param {number} [config.windowMinutes=15]
  * @param {string} [config.instanceId]
  * @param {string} [config.tempDir]
- * @param {import("@aws-sdk/client-s3").S3Client} [config.s3Client]
  * @param {Function} [config.onSignal] - test seam for process signal registration
  * @param {import("btrz-logger").Logger} logger - btrz-logger instance (`info`, `error`, …)
  */
@@ -129,7 +128,7 @@ function s3RequestRecorder(config = {}, logger) {
   const windowMinutes = config.windowMinutes == null ? 15 : config.windowMinutes;
   const instanceId = config.instanceId || `${os.hostname()}-${process.pid}`;
   const tempDir = config.tempDir || os.tmpdir();
-  const s3Client = config.s3Client || new S3Client(config.region ? {region: config.region} : {});
+  const s3Client = new S3Client(config.region ? {region: config.region} : {});
   let activeWindowStartMs = null;
   let activeTempPath = null;
   const inFlightAppends = new Map();
