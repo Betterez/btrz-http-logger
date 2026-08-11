@@ -35,28 +35,32 @@ const {s3RequestRecorder} = require("btrz-http-logger");
 
 app.use(s3RequestRecorder({
   bucket: "my-bucket",              // required; missing → no-op middleware
-  logger,                           // required; btrz-logger instance (`info` / `error` / …)
   prefix: "http-requests/my-service", // optional
   region: "us-east-1",              // optional (AWS default chain)
   windowMinutes: 15,                // optional, default 15
   instanceId: "i-abc",              // optional; fallback hostname + pid
   tempDir: undefined                // optional; default os.tmpdir()
-}));
+}, logger)); // required; btrz-logger instance (`info` / `error` / …)
 ```
+
+Signature: `s3RequestRecorder(config, logger)`.
 
 ### Config rules
 
 | Option | Required | Default | Notes |
 |--------|----------|---------|-------|
 | `bucket` | yes | — | If missing/empty, return no-op middleware that only calls `next()`, with a one-time `logger.error` |
-| `logger` | yes | — | `btrz-logger` `Logger` instance. Uses `logger.error(msg)` / `logger.error(msg, err)` for failures and missing-bucket notice. Missing logger → silent no-op |
 | `prefix` | no | `""` | Leading/trailing slashes normalized when building keys |
 | `region` | no | SDK default | Passed to `@aws-sdk/client-s3` when creating client |
 | `windowMinutes` | no | `15` | S3 key partition size; flush happens when a later request observes a new window (no timer) |
 | `instanceId` | no | `hostname-pid` | Used in S3 object key |
 | `tempDir` | no | `os.tmpdir()` | Local NDJSON buffer directory |
 
-Do **not** inject `fs`, `now`, `warn`, or `logError` via config. Always use `fs.promises` and `new Date()`. Logging goes through the provided `btrz-logger` instance.
+| Argument | Required | Notes |
+|----------|----------|-------|
+| `logger` | yes | Second argument: `btrz-logger` `Logger` instance. Uses `logger.error(msg)` / `logger.error(msg, err)`. Missing logger → silent no-op |
+
+Do **not** inject `fs`, `now`, `warn`, `logError`, or `logger` via config. Always use `fs.promises` and `new Date()`. Logging goes through the `logger` argument.
 
 Credentials use the default AWS SDK credential chain (or an optional test-only `s3Client` if provided by the consumer for tests).
 
@@ -146,7 +150,7 @@ Existing Morgan behavior and tests remain unchanged.
 
 | Failure | Request impact |
 |---------|----------------|
-| Missing `bucket` or `logger` | No-op middleware; `next()` only (`logger.error` once if logger present but bucket missing) |
+| Missing `bucket` or missing `logger` argument | No-op middleware; `next()` only (`logger.error` once if logger present but bucket missing) |
 | Temp dir / append failure | `logger.error` asynchronously; `next()` already called |
 | Body / JSON serialize failure | Record without `body`; `next()` |
 | S3 `PutObject` failure | `logger.error` asynchronously; delete temp file anyway; request already continued |

@@ -97,7 +97,6 @@ function safelyLog(logger, level, message, data) {
 /**
  * @param {Object} config
  * @param {string} config.bucket
- * @param {import("btrz-logger").Logger} config.logger - btrz-logger instance (`info`, `error`, …)
  * @param {string} [config.prefix]
  * @param {string} [config.region]
  * @param {number} [config.windowMinutes=15]
@@ -105,18 +104,15 @@ function safelyLog(logger, level, message, data) {
  * @param {string} [config.tempDir]
  * @param {import("@aws-sdk/client-s3").S3Client} [config.s3Client]
  * @param {Function} [config.onSignal] - test seam for process signal registration
+ * @param {import("btrz-logger").Logger} logger - btrz-logger instance (`info`, `error`, …)
  */
-function s3RequestRecorder(config = {}) {
-  const logger = config.logger;
-
+function s3RequestRecorder(config = {}, logger) {
   if (!config.bucket || !logger) {
     let warned = false;
     return function noopS3RequestRecorder(req, res, next) {
       if (!warned) {
         warned = true;
-        if (!logger) {
-          // cannot log without a logger
-        } else {
+        if (logger) {
           safelyLog(
             logger,
             "error",

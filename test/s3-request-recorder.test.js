@@ -116,7 +116,7 @@ test("returns no-op middleware when bucket is missing", () => {
   delete require.cache[recorderPath];
   const {s3RequestRecorder} = require("../src/s3-request-recorder");
   const logger = createTestLogger();
-  const mw = s3RequestRecorder({logger});
+  const mw = s3RequestRecorder({}, logger);
   let nextCalled = 0;
   mw({method: "GET", url: "/"}, {}, () => {
     nextCalled += 1;
@@ -132,9 +132,8 @@ test("returns no-op middleware when bucket is empty string", () => {
   const {s3RequestRecorder} = require("../src/s3-request-recorder");
   const logger = createTestLogger();
   const mw = s3RequestRecorder({
-    bucket: "",
-    logger
-  });
+    bucket: ""
+  }, logger);
   let nextCalled = 0;
   mw({method: "GET", url: "/"}, {}, () => {
     nextCalled += 1;
@@ -179,7 +178,6 @@ test("calls next without waiting for append or upload", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
@@ -191,7 +189,7 @@ test("calls next without waiting for append or upload", async () => {
             return {};
           }
         }
-      });
+      }, createTestLogger());
 
       mw(
         {
@@ -230,12 +228,11 @@ test("writes NDJSON with method url headers query and body when present", async 
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal,
         s3Client: {send: async () => ({})}
-      });
+      }, createTestLogger());
 
       mw(
         {
@@ -275,12 +272,11 @@ test("parses query from url when req.query is missing", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal,
         s3Client: {send: async () => ({})}
-      });
+      }, createTestLogger());
 
       mw(
         {
@@ -312,12 +308,11 @@ test("parses query from originalUrl when req.query and url lack querystring", as
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal,
         s3Client: {send: async () => ({})}
-      });
+      }, createTestLogger());
 
       mw(
         {
@@ -350,12 +345,11 @@ test("omits body when req.body is undefined", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal,
         s3Client: {send: async () => ({})}
-      });
+      }, createTestLogger());
 
       mw(
         {
@@ -390,12 +384,11 @@ test("calls next and omits body when req.body is circular", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal,
         s3Client: {send: async () => ({})}
-      });
+      }, createTestLogger());
 
       let nextCalled = 0;
       mw(
@@ -474,12 +467,11 @@ test("calls next even when append fails asynchronously", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger,
         instanceId: "i-1",
         tempDir,
         onSignal: noopOnSignal,
         s3Client: {send: async () => ({})}
-      });
+      }, logger);
 
       let nextCalled = 0;
       mw({method: "GET", url: "/", path: "/", query: {}, headers: {}}, {}, () => {
@@ -507,7 +499,6 @@ test("flushes previous window to S3 and deletes temp file on success", async () 
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
         prefix: "http-requests/sales",
-        logger: createTestLogger(),
         instanceId: "i-abc123",
         windowMinutes: 15,
         tempDir,
@@ -518,7 +509,7 @@ test("flushes previous window to S3 and deletes temp file on success", async () 
             return {};
           }
         }
-      });
+      }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
       const fileBefore = await waitForNdjsonFile(tempDir);
@@ -549,7 +540,6 @@ test("on upload failure logs error and still deletes temp file", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
-        logger,
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
@@ -559,7 +549,7 @@ test("on upload failure logs error and still deletes temp file", async () => {
             throw new Error("S3 down");
           }
         }
-      });
+      }, logger);
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
       const fileBefore = await waitForNdjsonFile(tempDir);
@@ -586,7 +576,6 @@ test("next is called before flush upload resolves", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
@@ -594,7 +583,7 @@ test("next is called before flush upload resolves", async () => {
         s3Client: {
           send: async () => uploadGate.promise
         }
-      });
+      }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
       const filePath = await waitForNdjsonFile(tempDir);
@@ -631,7 +620,6 @@ test("flush waits for an in-flight append before uploading", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
@@ -639,7 +627,7 @@ test("flush waits for an in-flight append before uploading", async () => {
         s3Client: {
           send: async (command) => puts.push(command.input || command)
         }
-      });
+      }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
       await appendStarted.promise;
@@ -668,7 +656,6 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
       const {s3RequestRecorder} = require("../src/s3-request-recorder");
       const mw = s3RequestRecorder({
         bucket: "b",
-        logger: createTestLogger(),
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
@@ -676,7 +663,7 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
         s3Client: {
           send: async (command) => puts.push(command.input || command)
         }
-      });
+      }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
       const filePath = await waitForNdjsonFile(tempDir);
@@ -706,7 +693,6 @@ test("signal handler flushes current window", async () => {
 
       const mw = s3RequestRecorder({
         bucket: "my-bucket",
-        logger: createTestLogger(),
         instanceId: "i-1",
         windowMinutes: 15,
         tempDir,
@@ -719,7 +705,7 @@ test("signal handler flushes current window", async () => {
             return {};
           }
         }
-      });
+      }, createTestLogger());
 
       mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
       const filePath = await waitForNdjsonFile(tempDir);
