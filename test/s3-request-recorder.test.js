@@ -29,3 +29,24 @@ test("returns no-op middleware when bucket is missing", () => {
   assert.equal(nextCalled, 1);
   assert.equal(warnings.length, 1);
 });
+
+test("returns no-op middleware when bucket is empty string", () => {
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+  const warnings = [];
+  const mw = s3RequestRecorder({
+    bucket: "",
+    logError: () => {},
+    warn: (msg) => warnings.push(msg)
+  });
+  let nextCalled = 0;
+  mw({method: "GET", url: "/"}, {}, () => {
+    nextCalled += 1;
+  });
+  mw({method: "POST", url: "/other"}, {}, () => {
+    nextCalled += 1;
+  });
+  assert.equal(nextCalled, 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /missing bucket/);
+});
