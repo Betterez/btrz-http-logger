@@ -134,7 +134,6 @@ function s3RequestRecorder(config = {}, logger) {
   const inFlightAppends = new Map();
   const pendingFinalizers = new Map();
   const flushWhenIdle = new Map();
-  const windowStartByPath = new Map();
 
   fsp.mkdir(tempDir, {recursive: true}).catch((err) => {
     safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder tempDir mkdir failed", err);
@@ -162,14 +161,19 @@ function s3RequestRecorder(config = {}, logger) {
   }
 
   function flushFile(filePath, windowStart) {
-    const work = Promise.resolve()
-      .then(() => inFlightAppends.get(filePath) || Promise.resolve())
-      .then(() => fsp.readFile(filePath))
-      .then((body) => {
+    const work = Promise.resolve().then(async () => {
+      await (inFlightAppends.get(filePath) || Promise.resolve());
+      if ((pendingFinalizers.get(filePath) || 0) > 0) {
+        flushWhenIdle.set(filePath, windowStart);
+        return;
+      }
+
+      try {
+        const body = await fsp.readFile(filePath);
         if (!body || !body.length) {
-          return null;
+          return;
         }
-        return s3Client.send(
+        await s3Client.send(
           new PutObjectCommand({
             Bucket: bucket,
             Key: buildS3Key({prefix, windowStart, instanceId}),
@@ -177,13 +181,14 @@ function s3RequestRecorder(config = {}, logger) {
             ContentType: "application/x-ndjson"
           })
         );
-      })
-      .catch((err) => {
+      } catch (err) {
         safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder S3 upload failed", err);
-      })
-      .finally(() => fsp.unlink(filePath).catch((err) => {
-        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
-      }));
+      } finally {
+        await fsp.unlink(filePath).catch((err) => {
+          safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
+        });
+      }
+    });
 
     work.catch(() => {});
   }
@@ -255,8 +260,6 @@ function s3RequestRecorder(config = {}, logger) {
 
       const tempPath = activeTempPath;
       const record = buildRecord(req, now);
-      bumpPending(tempPath);
-      windowStartByPath.set(tempPath, new Date(windowStart.getTime()));
       let finalized = false;
 
       function finalize(aborted) {
@@ -279,14 +282,18 @@ function s3RequestRecorder(config = {}, logger) {
       }
 
       if (res && typeof res.on === "function") {
-        res.on("finish", () => finalize(false));
-        res.on("close", () => {
-          if (!finalized) {
-            finalize(true);
-          }
-        });
-      } else {
-        releasePending(tempPath);
+        try {
+          res.on("finish", () => finalize(false));
+          res.on("close", () => {
+            if (!finalized) {
+              finalize(true);
+            }
+          });
+          bumpPending(tempPath);
+        } catch (err) {
+          finalized = true;
+          throw err;
+        }
       }
     } catch (err) {
       safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder record failed", err);

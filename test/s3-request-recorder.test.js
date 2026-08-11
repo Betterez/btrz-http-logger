@@ -763,6 +763,95 @@ test("signal handler flushes current window", async () => {
   }
 });
 
+test("signal flush waits for a new same-window request to finish", async () => {
+  const handlers = {};
+  const tempDir = makeTempDir();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder, puts} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        windowMinutes: 15,
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, createTestLogger());
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      const filePath = await waitForNdjsonFile(tempDir);
+
+      handlers.SIGTERM();
+      const res2 = createMockRes(200);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(puts.length, 0, "must not flush while same-window request is pending");
+      assert.equal(fs.existsSync(filePath), true);
+
+      res2.emit("finish");
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(puts.length, 1);
+      assert.match(String(puts[0].Body), /"url":"\/a"/);
+      assert.match(String(puts[0].Body), /"url":"\/b"/);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+test("throwing response listener registration does not strand pending flush", async () => {
+  const handlers = {};
+  const tempDir = makeTempDir();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder, puts} = loadRecorderModule();
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        windowMinutes: 15,
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, createTestLogger());
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      await waitForNdjsonFile(tempDir);
+
+      let nextCalled = 0;
+      mw(
+        {method: "GET", url: "/broken", path: "/broken", query: {}, headers: {}},
+        {
+          statusCode: 200,
+          on() {
+            throw new Error("listener registration failed");
+          }
+        },
+        () => {
+          nextCalled += 1;
+        }
+      );
+      handlers.SIGTERM();
+      await new Promise((r) => setTimeout(r, 30));
+
+      assert.equal(nextCalled, 1);
+      assert.equal(puts.length, 1);
+      assert.doesNotMatch(String(puts[0].Body), /"url":"\/broken"/);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
 test("records status and durationMs on finish without aborted", async () => {
   const tempDir = makeTempDir();
   const appendCalls = {count: 0};
