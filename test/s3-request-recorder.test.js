@@ -868,6 +868,62 @@ test("signal flush does not delete file when request starts during S3 send", asy
   }
 });
 
+test("signal flush retries when a request fully finalizes during S3 send", async () => {
+  const handlers = {};
+  const sendStarted = createDeferred();
+  const firstSendGate = createDeferred();
+  const uploads = [];
+  const tempDir = makeTempDir();
+
+  try {
+    await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder} = loadRecorderModule({
+        send: async (command) => {
+          uploads.push(command.input);
+          if (uploads.length === 1) {
+            sendStarted.resolve();
+            await firstSendGate.promise;
+          }
+          return {};
+        }
+      });
+      const mw = s3RequestRecorder({
+        bucket: "my-bucket",
+        instanceId: "i-1",
+        windowMinutes: 15,
+        tempDir,
+        onSignal: (event, handler) => {
+          handlers[event] = handler;
+        }
+      }, createTestLogger());
+
+      const res1 = createMockRes(200);
+      mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, res1, () => {});
+      res1.emit("finish");
+      const filePath = await waitForNdjsonFile(tempDir);
+
+      handlers.SIGTERM();
+      await sendStarted.promise;
+
+      const res2 = createMockRes(201);
+      mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      res2.emit("finish");
+      await waitForFile(filePath);
+
+      firstSendGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      assert.equal(uploads.length, 2);
+      assert.match(String(uploads[1].Body), /"url":"\/a"/);
+      assert.match(String(uploads[1].Body), /"url":"\/b"/);
+      assert.match(String(uploads[1].Body), /"status":201/);
+      assert.equal(fs.existsSync(filePath), false);
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+});
+
 test("throwing response listener registration does not strand pending flush", async () => {
   const handlers = {};
   const tempDir = makeTempDir();

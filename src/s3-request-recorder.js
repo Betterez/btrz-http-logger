@@ -134,6 +134,8 @@ function s3RequestRecorder(config = {}, logger) {
   const inFlightAppends = new Map();
   const pendingFinalizers = new Map();
   const flushWhenIdle = new Map();
+  const pathEpoch = new Map();
+  const flushChains = new Map();
 
   fsp.mkdir(tempDir, {recursive: true}).catch((err) => {
     safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder tempDir mkdir failed", err);
@@ -160,59 +162,108 @@ function s3RequestRecorder(config = {}, logger) {
     });
   }
 
-  function deferFlushForPending(filePath, windowStart) {
-    if ((pendingFinalizers.get(filePath) || 0) === 0) {
-      return false;
+  function deferFlushForChangedState(filePath, windowStart, epoch) {
+    const pending = pendingFinalizers.get(filePath) || 0;
+    if (pending === 0 && (pathEpoch.get(filePath) || 0) === epoch) {
+      return null;
     }
     flushWhenIdle.set(filePath, windowStart);
-    return true;
+    return pending > 0 ? "pending" : "stale";
   }
 
   function flushFile(filePath, windowStart) {
-    const work = Promise.resolve().then(async () => {
-      await (inFlightAppends.get(filePath) || Promise.resolve());
-      if (deferFlushForPending(filePath, windowStart)) {
-        return;
-      }
+    const previousFlush = flushChains.get(filePath) || Promise.resolve();
+    const work = previousFlush.catch(() => {}).then(async () => {
+      while (true) {
+        const epoch = pathEpoch.get(filePath) || 0;
 
-      try {
-        const body = await fsp.readFile(filePath);
-        if (deferFlushForPending(filePath, windowStart)) {
+        await (inFlightAppends.get(filePath) || Promise.resolve());
+        let changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+        if (changedState === "pending") {
           return;
         }
-        if (body && body.length) {
-          await s3Client.send(
-            new PutObjectCommand({
-              Bucket: bucket,
-              Key: buildS3Key({prefix, windowStart, instanceId}),
-              Body: body,
-              ContentType: "application/x-ndjson"
-            })
-          );
-          if (deferFlushForPending(filePath, windowStart)) {
+        if (changedState === "stale") {
+          continue;
+        }
+
+        try {
+          const body = await fsp.readFile(filePath);
+          changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+          if (changedState === "pending") {
             return;
           }
+          if (changedState === "stale") {
+            continue;
+          }
+          if (body && body.length) {
+            await s3Client.send(
+              new PutObjectCommand({
+                Bucket: bucket,
+                Key: buildS3Key({prefix, windowStart, instanceId}),
+                Body: body,
+                ContentType: "application/x-ndjson"
+              })
+            );
+            changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+            if (changedState === "pending") {
+              return;
+            }
+            if (changedState === "stale") {
+              continue;
+            }
+          }
+        } catch (err) {
+          changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+          if (changedState === "pending") {
+            return;
+          }
+          if (changedState === "stale") {
+            continue;
+          }
+          safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder S3 upload failed", err);
         }
-      } catch (err) {
-        if (deferFlushForPending(filePath, windowStart)) {
+
+        changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+        if (changedState === "pending") {
           return;
         }
-        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder S3 upload failed", err);
-      }
+        if (changedState === "stale") {
+          continue;
+        }
 
-      if (deferFlushForPending(filePath, windowStart)) {
+        await (inFlightAppends.get(filePath) || Promise.resolve());
+        changedState = deferFlushForChangedState(filePath, windowStart, epoch);
+        if (changedState === "pending") {
+          return;
+        }
+        if (changedState === "stale") {
+          continue;
+        }
+
+        await fsp.unlink(filePath).catch((err) => {
+          safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
+        });
+        flushWhenIdle.delete(filePath);
         return;
       }
-      await fsp.unlink(filePath).catch((err) => {
-        safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
-      });
     });
 
+    flushChains.set(filePath, work);
+    work.then(() => {
+      if (flushChains.get(filePath) === work) {
+        flushChains.delete(filePath);
+      }
+    }, () => {
+      if (flushChains.get(filePath) === work) {
+        flushChains.delete(filePath);
+      }
+    });
     work.catch(() => {});
   }
 
   function bumpPending(filePath) {
     pendingFinalizers.set(filePath, (pendingFinalizers.get(filePath) || 0) + 1);
+    pathEpoch.set(filePath, (pathEpoch.get(filePath) || 0) + 1);
   }
 
   function scheduleFlush(filePath, windowStart) {
