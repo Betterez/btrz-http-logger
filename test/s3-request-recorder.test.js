@@ -254,6 +254,7 @@ test("calls next without waiting for append or upload", async () => {
       );
 
       assert.equal(calls.next, 1);
+      await new Promise((r) => setImmediate(r));
       assert.equal(calls.append, 0);
       res.emit("finish");
       await appendStarted.promise;
@@ -764,6 +765,14 @@ test("signal handler flushes current window", async () => {
 
 test("records status and durationMs on finish without aborted", async () => {
   const tempDir = makeTempDir();
+  const appendCalls = {count: 0};
+  const originalAppend = fsp.appendFile;
+
+  fsp.appendFile = async (...args) => {
+    appendCalls.count += 1;
+    return originalAppend.apply(fsp, args);
+  };
+
   try {
     await withFakeNowAsync("2026-08-11T03:16:00.000Z", async (clock) => {
       const {s3RequestRecorder} = loadRecorderModule();
@@ -781,6 +790,8 @@ test("records status and durationMs on finish without aborted", async () => {
         () => {}
       );
 
+      await new Promise((r) => setImmediate(r));
+      assert.equal(appendCalls.count, 0);
       const filesBefore = await listNdjsonFiles(tempDir);
       assert.equal(filesBefore.length, 0);
 
@@ -795,6 +806,7 @@ test("records status and durationMs on finish without aborted", async () => {
       assert.equal(record.ts, "2026-08-11T03:16:00.000Z");
     });
   } finally {
+    fsp.appendFile = originalAppend;
     await fsp.rm(tempDir, {recursive: true, force: true});
   }
 });
