@@ -163,6 +163,26 @@ function s3RequestRecorder(config = {}) {
     work.catch(() => {});
   }
 
+  const registerSignal = config.onSignal || ((event, handler) => {
+    process.on(event, handler);
+  });
+
+  function flushActive() {
+    if (!activeTempPath || activeWindowStartMs == null) {
+      return;
+    }
+    const filePath = activeTempPath;
+    const windowStart = new Date(activeWindowStartMs);
+    activeTempPath = null;
+    activeWindowStartMs = null;
+    flushFile(filePath, windowStart);
+  }
+
+  try {
+    registerSignal("SIGTERM", flushActive);
+    registerSignal("SIGINT", flushActive);
+  } catch (_err) {}
+
   return function s3RequestRecorderMiddleware(req, res, next) {
     try {
       const now = nowFn();

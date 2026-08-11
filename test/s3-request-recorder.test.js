@@ -587,3 +587,50 @@ test("skips S3 upload for an empty previous file but deletes it", async () => {
   assert.equal(puts.length, 0);
   assert.equal(unlinks.length, 1);
 });
+
+test("signal handler flushes current window", async () => {
+  const handlers = {};
+  const puts = [];
+  const files = new Map();
+  const currentNow = new Date("2026-08-11T03:16:00.000Z");
+
+  delete require.cache[recorderPath];
+  const {s3RequestRecorder} = require("../src/s3-request-recorder");
+
+  const mw = s3RequestRecorder({
+    bucket: "my-bucket",
+    instanceId: "i-1",
+    windowMinutes: 15,
+    tempDir: "/tmp/btrz-s3-rec",
+    now: () => currentNow,
+    onSignal: (event, handler) => {
+      handlers[event] = handler;
+    },
+    fs: {
+      async mkdir() {},
+      async appendFile(filePath, data) {
+        files.set(filePath, (files.get(filePath) || "") + data);
+      },
+      async readFile(filePath) {
+        return files.get(filePath) || "";
+      },
+      async unlink() {}
+    },
+    s3Client: {
+      send: async (command) => {
+        puts.push(command.input || command);
+        return {};
+      }
+    },
+    logError: () => {}
+  });
+
+  mw({method: "GET", url: "/a", path: "/a", query: {}, headers: {}}, {}, () => {});
+  await new Promise((r) => setImmediate(r));
+  assert.equal(typeof handlers.SIGTERM, "function");
+  assert.equal(typeof handlers.SIGINT, "function");
+  handlers.SIGTERM();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(puts.length, 1);
+  assert.match(puts[0].Key, /0315-i-1\.ndjson$/);
+});
