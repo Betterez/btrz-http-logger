@@ -1,8 +1,9 @@
 "use strict";
 
+const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const fsp = require("fs").promises;
+const fsp = fs.promises;
 const {GetObjectCommand, PutObjectCommand, S3Client} = require("@aws-sdk/client-s3");
 
 function parseQueryFromUrl(url) {
@@ -231,8 +232,10 @@ function s3RequestRecorder(config = {}, logger) {
 
         const sealedPath = `${filePath}.${process.pid}.${Date.now()}.${sealedFileSequence++}.uploading`;
         flushWhenIdle.delete(filePath);
+        // renameSync must run immediately after the last synchronous pending/epoch check
+        // with no await in between, so finalize cannot append to the pre-seal path during seal.
         try {
-          await fsp.rename(filePath, sealedPath);
+          fs.renameSync(filePath, sealedPath);
         } catch (err) {
           if (err && err.code === "ENOENT") {
             return;
@@ -274,6 +277,9 @@ function s3RequestRecorder(config = {}, logger) {
           await fsp.unlink(sealedPath).catch((err) => {
             safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder temp delete failed", err);
           });
+        }
+        if ((pendingFinalizers.get(filePath) || 0) === 0) {
+          pathEpoch.delete(filePath);
         }
         return;
       }
