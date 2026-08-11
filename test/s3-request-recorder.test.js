@@ -805,7 +805,7 @@ test("signal flush waits for a new same-window request to finish", async () => {
   }
 });
 
-test("signal flush does not delete file when request starts during S3 send", async () => {
+test("signal flush isolates a request that starts during sealed S3 send", async () => {
   const handlers = {};
   const sendStarted = createDeferred();
   const firstSendGate = createDeferred();
@@ -849,16 +849,19 @@ test("signal flush does not delete file when request starts during S3 send", asy
 
       const res2 = createMockRes(200);
       mw({method: "GET", url: "/b", path: "/b", query: {}, headers: {}}, res2, () => {});
+      handlers.SIGTERM();
       firstSendGate.resolve();
       await firstSendFinished.promise;
       await new Promise((resolve) => setTimeout(resolve, 30));
 
-      assert.equal(fs.existsSync(filePath), true, "must not delete while request is pending");
+      assert.equal(uploads.length, 1);
+      assert.equal(fs.existsSync(filePath), false, "pending request has not appended yet");
 
       res2.emit("finish");
+      assert.match(await waitForFile(filePath), /"url":"\/b"/);
       const finalUpload = await secondSend.promise;
 
-      assert.match(String(finalUpload.Body), /"url":"\/a"/);
+      assert.doesNotMatch(String(finalUpload.Body), /"url":"\/a"/);
       assert.match(String(finalUpload.Body), /"url":"\/b"/);
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(fs.existsSync(filePath), false);
@@ -868,10 +871,11 @@ test("signal flush does not delete file when request starts during S3 send", asy
   }
 });
 
-test("signal flush retries when a request fully finalizes during S3 send", async () => {
+test("signal flush preserves a request that fully finalizes during sealed S3 send", async () => {
   const handlers = {};
   const sendStarted = createDeferred();
   const firstSendGate = createDeferred();
+  const secondSend = createDeferred();
   const uploads = [];
   const tempDir = makeTempDir();
 
@@ -883,6 +887,8 @@ test("signal flush retries when a request fully finalizes during S3 send", async
           if (uploads.length === 1) {
             sendStarted.resolve();
             await firstSendGate.promise;
+          } else {
+            secondSend.resolve(command.input);
           }
           return {};
         }
@@ -913,10 +919,18 @@ test("signal flush retries when a request fully finalizes during S3 send", async
       firstSendGate.resolve();
       await new Promise((resolve) => setTimeout(resolve, 30));
 
-      assert.equal(uploads.length, 2);
-      assert.match(String(uploads[1].Body), /"url":"\/a"/);
-      assert.match(String(uploads[1].Body), /"url":"\/b"/);
-      assert.match(String(uploads[1].Body), /"status":201/);
+      assert.equal(uploads.length, 1);
+      assert.match(String(uploads[0].Body), /"url":"\/a"/);
+      assert.doesNotMatch(String(uploads[0].Body), /"url":"\/b"/);
+      assert.match(await waitForFile(filePath), /"url":"\/b"/);
+
+      handlers.SIGTERM();
+      const finalUpload = await secondSend.promise;
+
+      assert.doesNotMatch(String(finalUpload.Body), /"url":"\/a"/);
+      assert.match(String(finalUpload.Body), /"url":"\/b"/);
+      assert.match(String(finalUpload.Body), /"status":201/);
+      await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(fs.existsSync(filePath), false);
     });
   } finally {
