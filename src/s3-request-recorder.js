@@ -132,6 +132,9 @@ function s3RequestRecorder(config = {}, logger) {
   let activeWindowStartMs = null;
   let activeTempPath = null;
   const inFlightAppends = new Map();
+  const pendingFinalizers = new Map();
+  const flushWhenIdle = new Map();
+  const windowStartByPath = new Map();
 
   fsp.mkdir(tempDir, {recursive: true}).catch((err) => {
     safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder tempDir mkdir failed", err);
@@ -185,6 +188,38 @@ function s3RequestRecorder(config = {}, logger) {
     work.catch(() => {});
   }
 
+  function bumpPending(filePath) {
+    pendingFinalizers.set(filePath, (pendingFinalizers.get(filePath) || 0) + 1);
+  }
+
+  function scheduleFlush(filePath, windowStart) {
+    if (!filePath) {
+      return;
+    }
+    const pending = pendingFinalizers.get(filePath) || 0;
+    if (pending > 0) {
+      flushWhenIdle.set(filePath, windowStart);
+      return;
+    }
+    flushWhenIdle.delete(filePath);
+    flushFile(filePath, windowStart);
+  }
+
+  function releasePending(filePath) {
+    const current = pendingFinalizers.get(filePath) || 0;
+    const next = Math.max(0, current - 1);
+    if (next === 0) {
+      pendingFinalizers.delete(filePath);
+    } else {
+      pendingFinalizers.set(filePath, next);
+    }
+    if (next === 0 && flushWhenIdle.has(filePath)) {
+      const windowStart = flushWhenIdle.get(filePath);
+      flushWhenIdle.delete(filePath);
+      flushFile(filePath, windowStart);
+    }
+  }
+
   const registerSignal = config.onSignal || ((event, handler) => {
     process.on(event, handler);
   });
@@ -197,7 +232,7 @@ function s3RequestRecorder(config = {}, logger) {
     const windowStart = new Date(activeWindowStartMs);
     activeTempPath = null;
     activeWindowStartMs = null;
-    flushFile(filePath, windowStart);
+    scheduleFlush(filePath, windowStart);
   }
 
   try {
@@ -212,7 +247,7 @@ function s3RequestRecorder(config = {}, logger) {
       const windowStart = getWindowStart(now, windowMinutes);
       if (activeWindowStartMs !== windowStart.getTime()) {
         if (activeWindowStartMs !== null) {
-          flushFile(activeTempPath, new Date(activeWindowStartMs));
+          scheduleFlush(activeTempPath, new Date(activeWindowStartMs));
         }
         activeWindowStartMs = windowStart.getTime();
         activeTempPath = ensureTempPath(windowStart);
@@ -220,6 +255,8 @@ function s3RequestRecorder(config = {}, logger) {
 
       const tempPath = activeTempPath;
       const record = buildRecord(req, now);
+      bumpPending(tempPath);
+      windowStartByPath.set(tempPath, new Date(windowStart.getTime()));
       let finalized = false;
 
       function finalize(aborted) {
@@ -236,6 +273,8 @@ function s3RequestRecorder(config = {}, logger) {
           trackAppend(tempPath, serializeRecord(record));
         } catch (err) {
           safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder finalize failed", err);
+        } finally {
+          releasePending(tempPath);
         }
       }
 
@@ -246,6 +285,8 @@ function s3RequestRecorder(config = {}, logger) {
             finalize(true);
           }
         });
+      } else {
+        releasePending(tempPath);
       }
     } catch (err) {
       safelyLog(logger, "error", "[btrz-http-logger] s3RequestRecorder record failed", err);
