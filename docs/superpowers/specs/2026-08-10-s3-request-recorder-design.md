@@ -99,7 +99,7 @@ Any error during serialize is caught before `next()`; append failures are handle
 
 ### Window = partition + flush
 
-- `windowMinutes` (default 15) defines the S3 key time partition and when a new temp file is started. Upload of the previous file is triggered when a request observes that the window has rolled (or on shutdown / pending retry).
+- `windowMinutes` (default 15) defines the S3 key time partition and when a new temp file is started. Upload of the previous file is triggered when a request observes that the window has rolled (or on shutdown).
 - Window start is computed in UTC by flooring the current time to `windowMinutes` (e.g. with 15: `03:00`, `03:15`, `03:30`, `03:45`).
 - **No `setInterval` / timers.** Flush is event-driven only:
   1. **On request, window rolled:** if the computed window start differs from the active window, fire-and-forget upload the previous temp file via `PutObject`, then schedule append of the new record to a new temp file for the current window.
