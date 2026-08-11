@@ -51,7 +51,7 @@ app.use(s3RequestRecorder({
 | `bucket` | yes | — | If missing/empty, return no-op middleware that only calls `next()`, with a one-time warning |
 | `prefix` | no | `""` | Leading/trailing slashes normalized when building keys |
 | `region` | no | SDK default | Passed to `@aws-sdk/client-s3` when creating client |
-| `windowMinutes` | no | `15` | Both S3 key partition size and flush interval |
+| `windowMinutes` | no | `15` | S3 key partition size; flush happens when a later request observes a new window (no timer) |
 | `instanceId` | no | `hostname-pid` | Used in S3 object key |
 | `tempDir` | no | `os.tmpdir()` | Local NDJSON buffer directory |
 | `s3Client` | no | new `S3Client` | Injectable for unit tests |
@@ -99,13 +99,14 @@ Any error during serialize is caught before `next()`; append failures are handle
 
 ### Window = partition + flush
 
-- `windowMinutes` (default 15) defines both:
-  - the S3 key time partition, and
-  - when to flush/upload and roll to a new temp file.
+- `windowMinutes` (default 15) defines the S3 key time partition and when a new temp file is started. Upload of the previous file is triggered when a request observes that the window has rolled (or on shutdown / pending retry).
 - Window start is computed in UTC by flooring the current time to `windowMinutes` (e.g. with 15: `03:00`, `03:15`, `03:30`, `03:45`).
-- Flush trigger: on each request, if the computed window start differs from the active window, fire-and-forget upload the previous temp file via `PutObject`, then append the new record to a new temp file for the current window. A backup `setInterval` aligned to `windowMinutes` also flushes idle windows with pending data (so quiet periods still upload).
-- Optional best-effort flush on `SIGTERM` / `SIGINT` (still non-throwing; not awaited by request handlers).
-- **After a successful S3 upload, delete the local temp file** for that window so disk does not fill up. Deletion is best-effort (errors logged, never thrown). Do **not** delete the temp file if upload fails (retain for a later flush/retry attempt within the process).
+- **No `setInterval` / timers.** Flush is event-driven only:
+  1. **On request, window rolled:** if the computed window start differs from the active window, fire-and-forget upload the previous temp file via `PutObject`, then schedule append of the new record to a new temp file for the current window.
+  2. **On request, pending failed uploads:** if any prior window files are still pending (upload previously failed), fire-and-forget retry those uploads (still never awaited on `next()`).
+  3. **On `SIGTERM` / `SIGINT`:** best-effort flush of the current window and any pending failed uploads (still non-throwing; not awaited by request handlers).
+- Trade-off: if traffic stops inside a window, that window’s file uploads on the next request after the window rolls, or on process shutdown — not on a timer.
+- **After a successful S3 upload, delete the local temp file** for that window so disk does not fill up. Deletion is best-effort (errors logged, never thrown). Do **not** delete the temp file if upload fails; keep an in-memory pending list and retry on a later request (or shutdown flush) within the same process.
 
 ### S3 object key
 
@@ -170,7 +171,7 @@ Implementation order is strictly:
 8. Returns no-op when `bucket` is missing.
 9. Existing Morgan tests in `test/index.test.js` still pass.
 
-Mocks: inject `s3Client` (or mock `@aws-sdk/client-s3`), mock/stub filesystem as needed, fake timers for window boundaries.
+Mocks: inject `s3Client` (or mock `@aws-sdk/client-s3`), mock/stub filesystem as needed; advance wall clock / inject a clock function for window boundaries (no timer mocks required).
 
 ## Out of scope for v1
 
