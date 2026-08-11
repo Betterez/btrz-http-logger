@@ -11,7 +11,7 @@ Add a **separate** Express middleware that records every HTTP request (all verbs
 Constraints:
 
 1. The middleware must **never fail** the HTTP request (no thrown errors, never call `next(err)`).
-2. S3 upload must be **asynchronous and non-blocking** — the request path must call `next()` without waiting for upload completion.
+2. **Local file append and S3 upload are both asynchronous and non-blocking** — the request path must call `next()` without waiting for disk I/O or upload completion.
 3. Implementation must be **TDD-first**: write failing tests, then implement until green.
 
 ## Non-goals
@@ -62,12 +62,12 @@ Credentials use the default AWS SDK credential chain unless the injected `s3Clie
 
 For every request (all HTTP methods):
 
-1. Build a record object (see below).
-2. Best-effort append one NDJSON line to the current window’s local temp file.
-3. Call `next()` immediately.
-4. Never await S3 upload on this path.
+1. Synchronously build/serialize a record object in memory (cheap; keep work minimal).
+2. Schedule a best-effort async append of one NDJSON line to the current window’s local temp file (e.g. `fs.promises.appendFile` / `fs.appendFile` callback) — **do not await it**.
+3. Call `next()` immediately after scheduling.
+4. Never await local append or S3 upload on this path.
 
-Any error during serialize/append is caught and discarded (optional stderr log); `next()` still runs.
+Any error during serialize is caught before `next()`; append failures are handled in the async callback (optional stderr log). `next()` always runs and is never delayed by disk I/O.
 
 ### Record shape
 
@@ -94,7 +94,8 @@ Any error during serialize/append is caught and discarded (optional stderr log);
 
 - One temp file per active window under `tempDir`.
 - Filename is internal/implementation detail (must be unique per process + window).
-- Append is best-effort (`fs.appendFile` / sync equivalent wrapped in try/catch).
+- Append is async and best-effort (`fs.appendFile` / `fs.promises.appendFile`); the middleware must not use `appendFileSync` or otherwise block the event loop waiting for the write to finish.
+- Concurrent appends to the same file are acceptable (Node’s append is atomic per write for typical line sizes); ordering of lines within a window is best-effort, not strictly request-order guaranteed under concurrency.
 
 ### Window = partition + flush
 
@@ -119,11 +120,12 @@ Example: `http-requests/sales/2026/08/11/0315-i-abc123.ndjson`
 - One object per **instance** per window (no shared key across processes).
 - Upload sends the full temp file contents for that window (`PutObject` overwrite of that instance key).
 
-### Async / never-fail upload
+### Async / never-fail I/O
 
-- Upload started with a Promise that is not awaited on the request path.
-- Rejected uploads are caught and logged; never rethrown to Express.
-- Request latency must not include S3 round-trip time.
+- Local append and S3 upload are both started as Promises/callbacks that are **not** awaited on the request path.
+- Rejected appends/uploads are caught and logged; never rethrown to Express.
+- Request latency must not include disk append time or S3 round-trip time.
+- Before uploading a window file, wait for in-flight appends for that file to settle (internal tracking), so the uploaded object is not truncated — this coordination happens only on the flush path, never on `next()`.
 
 ## Module layout
 
@@ -142,7 +144,7 @@ Existing Morgan behavior and tests remain unchanged.
 | Failure | Request impact |
 |---------|----------------|
 | Missing `bucket` | No-op middleware; `next()` only |
-| Temp dir / append failure | Log; `next()` |
+| Temp dir / append failure | Log asynchronously; `next()` already called |
 | Body / JSON serialize failure | Record without `body`; `next()` |
 | S3 `PutObject` failure | Log asynchronously; request already continued |
 | Unexpected throw in middleware | Catch; `next()` |
@@ -157,8 +159,8 @@ Implementation order is strictly:
 
 ### Required test cases
 
-1. Calls `next()` even when append fails.
-2. Calls `next()` without waiting for S3 upload to resolve.
+1. Calls `next()` even when append fails (async failure after `next()`).
+2. Calls `next()` without waiting for local append or S3 upload to resolve.
 3. Writes NDJSON including method, url, headers, query.
 4. Includes `body` only when `req.body` is present.
 5. Builds S3 key from window start + `instanceId` (UTC).
