@@ -29,6 +29,13 @@ httpLogger(app, getHttpLogger(), "btrz-api-sales", config.logging);
 
 `stream` is whatever your API already uses (e.g. a `btrz-logger` / rotating file stream from `getHttpLogger()`).
 
+`responselength` in the response log is the `Content-Length` header when the response has one. Streamed (chunked)
+responses have no `Content-Length`, so when `response` logging is enabled the logger also counts the body bytes passed to
+`res.write()` / `res.end()` and logs that count instead. For a response that is aborted mid-stream, this is the number
+of bytes written before the abort. It is `-` when no headers were sent.
+
+Call `httpLogger(...)` before registering routes so the byte counting middleware wraps every response.
+
 ## s3RequestRecorder
 
 Records each HTTP request (method, URL, headers, query, optional body, response `status`, `durationMs`) as NDJSON and uploads per time window to S3.

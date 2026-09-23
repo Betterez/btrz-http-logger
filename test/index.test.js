@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const Module = require("node:module");
 
+const {countResponseBytes, responseLength} = require("../src/response-length");
+
 const moduleUnderTestPath = path.resolve(__dirname, "..", "index.js");
 
 function createMorganMock() {
@@ -159,15 +161,36 @@ test("registers request and response middleware when enabled", () => {
 
   loggerFactory(app, stream, "svc", {request: true, response: true});
 
-  assert.equal(app.useCalls.length, 2);
+  assert.equal(app.useCalls.length, 3);
   assert.deepEqual(app.useCalls[0], {
     formatName: "request-log",
     options: {stream, immediate: true}
   });
-  assert.deepEqual(app.useCalls[1], {
+  assert.equal(app.useCalls[1], countResponseBytes);
+  assert.deepEqual(app.useCalls[2], {
     formatName: "combined-log",
     options: {stream}
   });
+});
+
+test("does not count response bytes when response logging is disabled", () => {
+  const {app, stream, loggerFactory} = loadLoggerModule();
+
+  loggerFactory(app, stream, "svc", {request: true});
+
+  assert.equal(app.useCalls.length, 1);
+  assert.equal(app.useCalls.includes(countResponseBytes), false);
+});
+
+test("combined-log reports responselength using the responseLength token", () => {
+  const {app, stream, morganMock, loggerFactory} = loadLoggerModule();
+
+  loggerFactory(app, stream, "svc");
+
+  assert.equal(morganMock.tokens.responseLength, responseLength);
+  const output = morganMock.formats["combined-log"]({}, {}, {statusCode: 200});
+  assert.match(output, / responselength=:responseLength /);
+  assert.doesNotMatch(output, /:res\[content-length]/);
 });
 
 test("serverId token prefers ec2 id then server id, fallback missing", () => {

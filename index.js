@@ -1,6 +1,7 @@
 "use strict";
 const process = require("process");
 const memoize = require("./src/memoize");
+const {countResponseBytes, responseLength} = require("./src/response-length");
 const morgan = require("morgan");
 const {trace: otlpTrace} = require("@opentelemetry/api");
 
@@ -47,6 +48,8 @@ module.exports = function _default(app, stream, name, config = {}) {
   morgan.token("grafanaTraceId", () => {
     return otlpTrace.getActiveSpan()?.spanContext().traceId || "-";
   });
+
+  morgan.token("responseLength", responseLength);
 
   let _dateOfPreviousLogLine = null;
   let _numberOfOtherLogsUsingThisDate = 0;
@@ -117,7 +120,7 @@ module.exports = function _default(app, stream, name, config = {}) {
     }
 
     return morgan.compile(
-      `[${name}-res] server_id=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" responsetime=:response-time[1] date=":uniqueDate" amzn_trace_id=":traceId" grafana_trace_id=":grafanaTraceId" method=:method url=":url" http=:http-version ${statusCodeColorFn("status=", ":status")} responselength=:res[content-length] referrer=":referrer" useragent=":user-agent"`
+      `[${name}-res] server_id=":serverId" remoteaddr=":remote-addr" xapikey=":req[x-api-key]" responsetime=:response-time[1] date=":uniqueDate" amzn_trace_id=":traceId" grafana_trace_id=":grafanaTraceId" method=:method url=":url" http=:http-version ${statusCodeColorFn("status=", ":status")} responselength=:responseLength referrer=":referrer" useragent=":user-agent"`
     );
   });
 
@@ -143,6 +146,7 @@ module.exports = function _default(app, stream, name, config = {}) {
   }
 
   if (config.response) {
+    app.use(countResponseBytes);
     app.use(morgan("combined-log", {
       stream
     }));
