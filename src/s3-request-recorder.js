@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const fsp = fs.promises;
 const {GetObjectCommand, PutObjectCommand, S3Client} = require("@aws-sdk/client-s3");
+const {sanitizeRecord} = require("./sanitize-card-data");
 
 function parseQueryFromUrl(url) {
   if (!url || typeof url !== "string") {
@@ -43,14 +44,19 @@ function buildRecord(req, now) {
     headers: req.headers || {}
   };
 
-  if (req.body !== undefined) {
+  if (Buffer.isBuffer(req.body)) {
+    const text = req.body.toString("utf8");
+    if (Buffer.from(text, "utf8").equals(req.body)) {
+      record.body = text;
+    }
+  } else if (req.body !== undefined) {
     record.body = req.body;
   }
 
   return record;
 }
 
-function snapshotRecord(req, now) {
+function cloneRecord(req, now) {
   const record = buildRecord(req, now);
   try {
     return JSON.parse(JSON.stringify(record));
@@ -69,6 +75,17 @@ function snapshotRecord(req, now) {
         headers: {}
       };
     }
+  }
+}
+
+function snapshotRecord(req, now) {
+  const record = cloneRecord(req, now);
+  try {
+    return sanitizeRecord(record);
+  } catch (_err) {
+    const withoutBody = Object.assign({}, record);
+    delete withoutBody.body;
+    return sanitizeRecord(withoutBody);
   }
 }
 

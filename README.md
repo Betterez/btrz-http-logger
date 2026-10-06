@@ -108,7 +108,39 @@ Each line is one JSON object, for example:
 
 - `body` is included only when `req.body` is defined.
 - `aborted: true` is set only when the response closes without `finish`.
-- Headers are recorded as received (no redaction).
+- Headers are recorded as received, except for credit card data (see below).
+
+### Credit card masking
+
+Before a record is written to disk or S3, credit card data in `url`, `path`, `query`, `headers` and `body` is
+replaced with `x` (one `x` per character):
+
+- **By field name** (object keys, form-encoded / query-string keys, header names; case and `-`/`_` insensitive):
+  - card numbers: `cardNumber`, `ccNumber`, `creditCardNumber`, `cardNo`, `pan`, …
+  - security codes: `cvv`, `cvv2`, `cvc`, `ccv`, `cvn`, `securityCode`, `cardCode`, …
+  - AVS: `avs`, `avsCode`, `avsResult`, `avsZip`, …
+  - expiration: `expMonth`, `expYear`, `expirationMonth`, `expiryYear`, `ccExp`, `cardExpiration`, …
+  - track data: `track1`, `track2`, `trackData`, `magstripe`, …
+  - `x-` prefixed variants are matched too (e.g. `x-cid`, `x-avs-code` headers).
+  - inside a card object, generic keys are masked too: `number`, `exp*`, `expiration*`, `month`, `year`, `code`,
+    `authorization`, `verificationCode`, `verificationValue`, `securityValue`. A card object is any value under a key
+    with a `card`, `cards`, `cc` or `credit` word (camelCase, `_`, `-` boundaries; e.g. `creditCard`, `customerCard`,
+    `card_info`, `ccInfo` — but not `cardinality` or `discarded`), or any object / query string that holds a card
+    number field or a card number value (e.g. a `btrz-api-sales` order payment
+    `{method: "online_credit", ccnumber, authorization, expiryMonth, expiryYear}`).
+  - Adyen encrypted fields (`encryptedCardNumber`, `encryptedExpiryMonth`, `encryptedExpiryYear`,
+    `encryptedSecurityCode`) are masked.
+
+  If a matched field holds an object or array, every string/number leaf in it is masked.
+- **By value** anywhere in the record:
+  - 13–19 digit runs (optionally separated by spaces, dashes, `+`, `%20`, `%2B` or `%2D`) that start with a card
+    network prefix and pass the Luhn check. Only the digits are replaced, separators are kept. Inside a card object,
+    numbers beyond `Number.MAX_SAFE_INTEGER` with a card number shape are masked without the Luhn check (precision is
+    already lost).
+  - Track 1 (`%B…^…^…?`) and Track 2 (`;…=…?`) data, masked entirely.
+- String bodies and values that are JSON are parsed and sanitized; they are re-serialized only when something was
+  masked, otherwise the original text is kept. `Buffer` bodies are recorded as UTF-8 text, or omitted when they are
+  not valid UTF-8. Subtrees nested deeper than 64 levels are replaced with `[TRUNCATED]`.
 
 ### S3 object key
 
