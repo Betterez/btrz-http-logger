@@ -5,9 +5,9 @@ const MASK_CHAR = "x";
 const CARD_NUMBER_CANDIDATE = /(?<![0-9A-Za-z])\d(?:[ -]?\d){12,18}(?![0-9A-Za-z])/g;
 
 const CARD_CONTEXT_KEY = /card|^cc|credit/;
+const CARD_NUMBER_KEY = [/(card|cc)(number|num|no)$/, /^pan$/];
 const SENSITIVE_KEY_ANYWHERE = [
-  /(card|cc)(number|num|no)$/,
-  /^pan$/,
+  ...CARD_NUMBER_KEY,
   /(cvv2?|cvc2?|ccv|cvn|securitycode)$/,
   /^(creditcard|card|cc)?(cid|csc)$/,
   /(card|cc)(code|verificationcode|verificationvalue)$/,
@@ -15,7 +15,8 @@ const SENSITIVE_KEY_ANYWHERE = [
   /exp(iry|iration)?(month|mon|year|yr|mm|yy|yyyy)$/,
   /(card|cc)exp/
 ];
-const SENSITIVE_KEY_IN_CARD_CONTEXT = /^(number|num|no|month|mon|year|yr|mm|yy|yyyy|code)$|^exp/;
+// btrz-api-sales order payments send the card security value as `authorization` next to `ccnumber`.
+const SENSITIVE_KEY_IN_CARD_CONTEXT = /^(number|num|no|month|mon|year|yr|mm|yy|yyyy|code|authorization)$|^exp/;
 
 function normalizeKey(key) {
   return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -36,8 +37,8 @@ function isSensitiveKey(key, inCardContext) {
   return inCardContext && SENSITIVE_KEY_IN_CARD_CONTEXT.test(normalized);
 }
 
-function isSensitiveKeyPath(segments) {
-  let inCardContext = false;
+function isSensitiveKeyPath(segments, inTopLevelCardContext) {
+  let inCardContext = inTopLevelCardContext;
   for (const segment of segments) {
     if (isSensitiveKey(segment, inCardContext)) {
       return true;
@@ -96,15 +97,31 @@ function decodeQueryComponent(component) {
 }
 
 function maskQueryPairs(query) {
-  return query.split("&").map((pair) => {
+  const pairs = query.split("&").map((pair) => {
     const eqIndex = pair.indexOf("=");
     if (eqIndex === -1) {
-      return pair;
+      return {pair};
     }
     const rawKey = pair.slice(0, eqIndex);
     const rawValue = pair.slice(eqIndex + 1);
-    const segments = decodeQueryComponent(rawKey).split(/[[\].]+/).filter(Boolean);
-    if (!isSensitiveKeyPath(segments)) {
+    return {
+      pair,
+      rawKey,
+      rawValue,
+      segments: decodeQueryComponent(rawKey).split(/[[\].]+/).filter(Boolean),
+      value: decodeQueryComponent(rawValue)
+    };
+  });
+  const fields = {};
+  for (const {segments, value} of pairs) {
+    if (segments && segments.length === 1) {
+      fields[segments[0]] = value;
+    }
+  }
+  const inCardContext = holdsCardNumber(fields);
+
+  return pairs.map(({pair, rawKey, rawValue, segments}) => {
+    if (!segments || !isSensitiveKeyPath(segments, inCardContext)) {
       return pair;
     }
     return `${rawKey}=${maskAll(rawValue)}`;
@@ -155,15 +172,30 @@ function sanitizeNode(value, inCardContext) {
     return value.map((item) => sanitizeNode(item, inCardContext));
   }
   if (value && typeof value === "object") {
+    const objectInCardContext = inCardContext || holdsCardNumber(value);
     const sanitized = {};
     for (const key of Object.keys(value)) {
-      sanitized[key] = isSensitiveKey(key, inCardContext)
+      sanitized[key] = isSensitiveKey(key, objectInCardContext)
         ? maskLeaves(value[key])
-        : sanitizeNode(value[key], inCardContext || isCardContextKey(key));
+        : sanitizeNode(value[key], objectInCardContext || isCardContextKey(key));
     }
     return sanitized;
   }
   return value;
+}
+
+function holdsCardNumber(object) {
+  return Object.keys(object).some((key) => {
+    const field = object[key];
+    if (CARD_NUMBER_KEY.some((pattern) => pattern.test(normalizeKey(key))) && field !== null && field !== "") {
+      return true;
+    }
+    if (typeof field !== "string" && typeof field !== "number") {
+      return false;
+    }
+    const text = String(field);
+    return maskCardNumbersInString(text) !== text;
+  });
 }
 
 /**

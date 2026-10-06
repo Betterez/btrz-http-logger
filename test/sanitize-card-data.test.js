@@ -167,6 +167,60 @@ test("masks generic number, expiration and code fields inside a card object", ()
   });
 });
 
+test("masks a btrz-api-sales order payment that carries card data", () => {
+  const out = sanitizeValue({
+    cartId: "abc",
+    payments: [{
+      method: "online_credit",
+      amount: 502,
+      ccnumber: "4111-1111-1111 1111",
+      authorization: "655",
+      expiryMonth: 3,
+      expiryYear: 2029,
+      description: "paying!"
+    }],
+    customerInfo: {firstName: "first a", zip: "888"}
+  });
+  assert.deepEqual(out, {
+    cartId: "abc",
+    payments: [{
+      method: "online_credit",
+      amount: 502,
+      ccnumber: "xxxxxxxxxxxxxxxxxxx",
+      authorization: "xxx",
+      expiryMonth: "x",
+      expiryYear: "xxxx",
+      description: "paying!"
+    }],
+    customerInfo: {firstName: "first a", zip: "888"}
+  });
+});
+
+test("treats an object holding a Luhn-valid card number as a card object", () => {
+  const out = sanitizeValue({
+    paymentData: {number: VISA, month: 12, year: 2027, code: "123", authorization: "999", amount: 10}
+  });
+  assert.deepEqual(out, {
+    paymentData: {number: "xxxxxxxxxxxxxxxx", month: "xx", year: "xxxx", code: "xxx", authorization: "xxx", amount: 10}
+  });
+});
+
+test("masks btrz-pay stored card and stripe terminal payloads", () => {
+  const out = sanitizeValue({
+    customerCard: {maskedPAN: "4455", expiryDate: "07/2001", cardType: "visa", provider: "authorizeNet"},
+    stripePayment: {ccNumber: "4242424242424242"}
+  });
+  assert.deepEqual(out, {
+    customerCard: {maskedPAN: "4455", expiryDate: "xxxxxxx", cardType: "visa", provider: "authorizeNet"},
+    stripePayment: {ccNumber: "xxxxxxxxxxxxxxxx"}
+  });
+});
+
+test("does not mask authorization outside a card object", () => {
+  const out = sanitizeValue({payments: [{method: "cash", amount: 5, authorization: "A1"}], authorization: "Bearer t"});
+  assert.deepEqual(out, {payments: [{method: "cash", amount: 5, authorization: "A1"}], authorization: "Bearer t"});
+});
+
 test("masks every leaf when a sensitive field holds an object or array", () => {
   const out = sanitizeValue({
     expMonth: {value: "12"},
@@ -214,9 +268,9 @@ test("sanitizeRecord masks url, path, query, headers and body", () => {
   assert.deepEqual(sanitizeRecord(record), {
     ts: "2026-08-11T03:16:00.000Z",
     method: "POST",
-    url: "/v1/pay/xxxxxxxxxxxxxxxx?cardNumber=xxxxxxxxxxxxxxxx&cvv=xxx&exp_month=xx&avs=x&expirationDate=2027-01&foo=1",
+    url: "/v1/pay/xxxxxxxxxxxxxxxx?cardNumber=xxxxxxxxxxxxxxxx&cvv=xxx&exp_month=xx&avs=x&expirationDate=xxxxxxx&foo=1",
     path: "/v1/pay/xxxxxxxxxxxxxxxx",
-    query: {cardNumber: "xxxxxxxxxxxxxxxx", cvv: "xxx", exp_month: "xx", avs: "x", expirationDate: "2027-01", foo: "1"},
+    query: {cardNumber: "xxxxxxxxxxxxxxxx", cvv: "xxx", exp_month: "xx", avs: "x", expirationDate: "xxxxxxx", foo: "1"},
     headers: {host: "example", "x-card-number": "xxxx", "x-note": "card xxxxxxxxxxxxxxxx"},
     body: {creditCard: {number: "xxxxxxxxxxxxxxxx", cvv: "xxx", expMonth: "xx", expYear: "xxxx"}, avsCode: "x"},
     status: 201,
@@ -234,6 +288,17 @@ test("sanitizeRecord masks bracketed card fields in url query strings", () => {
   assert.equal(
     sanitizeRecord(record).url,
     "/v1/pay?creditCard%5Bnumber%5D=xxxx&creditCard[cvv]=xxx&card.expiration=xxxxxxx"
+  );
+});
+
+test("treats a query string with card data as a card object", () => {
+  assert.equal(
+    sanitizeRecord({url: "/v1/orders?ccnumber=4111&authorization=655&month=3&year=2029&foo=1", path: "/", query: {}, headers: {}}).url,
+    "/v1/orders?ccnumber=xxxx&authorization=xxx&month=x&year=xxxx&foo=1"
+  );
+  assert.equal(
+    sanitizeRecord({url: "/v1/orders?authorization=655&month=3", path: "/", query: {}, headers: {}}).url,
+    "/v1/orders?authorization=655&month=3"
   );
 });
 

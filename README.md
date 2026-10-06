@@ -108,7 +108,27 @@ Each line is one JSON object, for example:
 
 - `body` is included only when `req.body` is defined.
 - `aborted: true` is set only when the response closes without `finish`.
-- Headers are recorded as received (no redaction).
+- Headers are recorded as received, except for credit card data (see below).
+
+### Credit card masking
+
+Before a record is written to disk or S3, credit card data in `url`, `path`, `query`, `headers` and `body` is
+replaced with `x` (one `x` per character):
+
+- **By field name** (object keys, form-encoded / query-string keys, header names; case and `-`/`_` insensitive):
+  - card numbers: `cardNumber`, `ccNumber`, `creditCardNumber`, `cardNo`, `pan`, …
+  - security codes: `cvv`, `cvv2`, `cvc`, `ccv`, `cvn`, `securityCode`, `cardCode`, …
+  - AVS: `avs`, `avsCode`, `avsResult`, `avsZip`, …
+  - expiration: `expMonth`, `expYear`, `expirationMonth`, `expiryYear`, `ccExp`, `cardExpiration`, …
+  - inside a card object, generic keys are masked too: `number`, `exp*`, `expiration*`, `month`, `year`, `code`,
+    `authorization`. A card object is any value under a key containing `card`, `credit` or starting with `cc`
+    (e.g. `creditCard: {...}`, `customerCard: {...}`), or any object / query string that holds a card number field
+    or a card number value (e.g. a `btrz-api-sales` order payment
+    `{method: "online_credit", ccnumber, authorization, expiryMonth, expiryYear}`).
+
+  If a matched field holds an object or array, every string/number leaf in it is masked.
+- **By value** anywhere in the record: 13–19 digit runs (optionally separated by spaces or dashes) that start with a
+  card network prefix and pass the Luhn check. Only the digits are replaced, separators are kept.
 
 ### S3 object key
 
