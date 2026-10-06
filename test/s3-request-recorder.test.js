@@ -448,6 +448,83 @@ test("masks credit card data before writing the NDJSON record", async () => {
   }
 });
 
+async function recordOne(req) {
+  const tempDir = makeTempDir();
+  try {
+    return await withFakeNowAsync("2026-08-11T03:16:00.000Z", async () => {
+      const {s3RequestRecorder} = loadRecorderModule();
+      const mw = s3RequestRecorder(recorderConfig({
+        bucket: "b",
+        instanceId: "i-1",
+        tempDir,
+        onSignal: noopOnSignal
+      }), createTestLogger());
+      const res = createMockRes(200);
+      let nextCalled = false;
+      mw(req, res, () => {
+        nextCalled = true;
+      });
+      res.emit("finish");
+      const filePath = await waitForNdjsonFile(tempDir);
+      const content = await fsp.readFile(filePath, "utf8");
+      return {content, record: JSON.parse(content.trim().split("\n")[0]), nextCalled};
+    });
+  } finally {
+    await fsp.rm(tempDir, {recursive: true, force: true});
+  }
+}
+
+test("records Buffer bodies as sanitized text instead of raw bytes", async () => {
+  const {content, record} = await recordOne({
+    method: "POST",
+    url: "/v1/payments",
+    path: "/v1/payments",
+    query: {},
+    headers: {},
+    body: Buffer.from("ccnumber=4111111111111111&cvv=123", "utf8")
+  });
+  assert.equal(record.body, "ccnumber=xxxxxxxxxxxxxxxx&cvv=xxx");
+  assert.equal(content.includes("4111111111111111"), false);
+});
+
+test("truncates body subtrees nested deeper than the sanitizer depth limit", async () => {
+  let body = {cvv: "123"};
+  for (let i = 0; i < 3000; i++) {
+    body = {nested: body};
+  }
+  const {content, record, nextCalled} = await recordOne({
+    method: "POST",
+    url: "/v1/payments",
+    path: "/v1/payments",
+    query: {},
+    headers: {},
+    body
+  });
+  assert.equal(nextCalled, true);
+  assert.equal(content.includes("123"), false);
+  assert.equal(content.includes("[TRUNCATED]"), true);
+  assert.equal(typeof record.body.nested, "object");
+});
+
+test("still records a sanitized request without body when the body cannot be cloned", async () => {
+  let body = {cvv: "123"};
+  for (let i = 0; i < 20000; i++) {
+    body = {nested: body};
+  }
+  const {record, nextCalled} = await recordOne({
+    method: "POST",
+    url: "/v1/payments?cvv=123",
+    path: "/v1/payments",
+    query: {cvv: "123"},
+    headers: {},
+    body
+  });
+  assert.equal(nextCalled, true);
+  assert.equal(record.url, "/v1/payments?cvv=xxx");
+  assert.deepEqual(record.query, {cvv: "xxx"});
+  assert.equal(Object.prototype.hasOwnProperty.call(record, "body"), false);
+});
+
 test("snapshots request body before next mutates it", async () => {
   const tempDir = makeTempDir();
 

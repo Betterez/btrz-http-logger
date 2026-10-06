@@ -1,22 +1,31 @@
 "use strict";
 
 const MASK_CHAR = "x";
+const MAX_DEPTH = 64;
+const TRUNCATED = "[TRUNCATED]";
 
-const CARD_NUMBER_CANDIDATE = /(?<![0-9A-Za-z])\d(?:[ -]?\d){12,18}(?![0-9A-Za-z])/g;
+const URL_ENCODED_SEPARATOR = /%20|%2[dD]/g;
+const CARD_NUMBER_CANDIDATE = /(?<![0-9A-Za-z])\d(?:(?:[ +-]|%20|%2[dD])?\d){12,18}(?![0-9A-Za-z])/g;
+const TRACK_DATA = [
+  /%B\d{13,19}\^[^^]{0,26}\^[^?]{0,80}\?/g,
+  /;\d{13,19}=\d{0,40}\?/g
+];
 
-const CARD_CONTEXT_KEY = /card|^cc|credit/;
+const CARD_CONTEXT_KEY = /^(card|cc|credit)|cards?$|card(info|data|details)$/;
 const CARD_NUMBER_KEY = [/(card|cc)(number|num|no)$/, /^pan$/];
 const SENSITIVE_KEY_ANYWHERE = [
   ...CARD_NUMBER_KEY,
-  /(cvv2?|cvc2?|ccv|cvn|securitycode)$/,
-  /^(creditcard|card|cc)?(cid|csc)$/,
-  /(card|cc)(code|verificationcode|verificationvalue)$/,
-  /^avs|avs$|(card|cc)avs/,
-  /exp(iry|iration)?(month|mon|year|yr|mm|yy|yyyy)$/,
-  /(card|cc)exp/
+  /(cvv2?|cvc2?|cv2|ccv|cvn|cvd|securitycode)$/,
+  /^x?(creditcard|card|cc)?(cid|csc)$/,
+  /(card|cc)(code|verificationcode|verificationvalue|securityvalue)$/,
+  /^x?avs|avs$|(card|cc)avs/,
+  /^x?(creditcard|card|cc)?exp(iry|iration)?(month|mon|year|yr|mm|yy|yyyy)$/,
+  /(card|cc)exp/,
+  /^x?(track[12]?|track[12]?data|magstripe|magstripedata|magneticstripe)$/
 ];
 // btrz-api-sales order payments send the card security value as `authorization` next to `ccnumber`.
-const SENSITIVE_KEY_IN_CARD_CONTEXT = /^(number|num|no|month|mon|year|yr|mm|yy|yyyy|code|authorization)$|^exp/;
+const SENSITIVE_KEY_IN_CARD_CONTEXT =
+  /^(number|num|no|month|mon|year|yr|mm|yy|yyyy|code|authorization|verificationvalue|securityvalue)$|^exp/;
 
 function normalizeKey(key) {
   return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -69,22 +78,27 @@ function passesLuhn(digits) {
   return sum % 10 === 0;
 }
 
-function looksLikeCardNumber(digits) {
+function hasCardNumberShape(digits) {
   if (digits.length < 13 || digits.length > 19) {
     return false;
   }
-  if (!/^[2-6]/.test(digits) || (digits.length === 13 && digits[0] !== "4")) {
-    return false;
-  }
-  return passesLuhn(digits);
+  return /^[2-6]/.test(digits) && (digits.length !== 13 || digits[0] === "4");
+}
+
+function looksLikeCardNumber(digits) {
+  return hasCardNumberShape(digits) && passesLuhn(digits);
 }
 
 function maskCardNumbersInString(text) {
-  return text.replace(CARD_NUMBER_CANDIDATE, (match) => {
-    if (!looksLikeCardNumber(match.replace(/\D/g, ""))) {
+  let masked = text;
+  for (const pattern of TRACK_DATA) {
+    masked = masked.replace(pattern, maskAll);
+  }
+  return masked.replace(CARD_NUMBER_CANDIDATE, (match) => {
+    if (!looksLikeCardNumber(match.replace(URL_ENCODED_SEPARATOR, "").replace(/\D/g, ""))) {
       return match;
     }
-    return match.replace(/\d/g, MASK_CHAR);
+    return match.replace(/(%20|%2[dD])|\d/g, (char, separator) => separator || MASK_CHAR);
   });
 }
 
@@ -128,7 +142,25 @@ function maskQueryPairs(query) {
   }).join("&");
 }
 
-function sanitizeString(text) {
+function sanitizeJsonText(text, depth) {
+  const trimmed = text.trim();
+  if (!/^[{[]/.test(trimmed)) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (_err) {
+    return null;
+  }
+  return JSON.stringify(sanitizeNode(parsed, false, depth + 1));
+}
+
+function sanitizeString(text, depth) {
+  const sanitizedJson = sanitizeJsonText(text, depth);
+  if (sanitizedJson !== null) {
+    return sanitizedJson;
+  }
   let masked = text;
   if (masked.includes("=")) {
     const queryStart = masked.indexOf("?");
@@ -139,7 +171,19 @@ function sanitizeString(text) {
   return maskCardNumbersInString(masked);
 }
 
-function maskLeaves(value) {
+function sanitizeNumber(value) {
+  const text = String(value);
+  if (Number.isInteger(value) && !Number.isSafeInteger(value) && hasCardNumberShape(text)) {
+    return maskAll(text);
+  }
+  const masked = maskCardNumbersInString(text);
+  return masked === text ? value : masked;
+}
+
+function maskLeaves(value, depth = 0) {
+  if (depth > MAX_DEPTH) {
+    return TRUNCATED;
+  }
   if (typeof value === "string") {
     return maskAll(value);
   }
@@ -147,37 +191,38 @@ function maskLeaves(value) {
     return maskAll(String(value));
   }
   if (Array.isArray(value)) {
-    return value.map(maskLeaves);
+    return value.map((item) => maskLeaves(item, depth + 1));
   }
   if (value && typeof value === "object") {
     const masked = {};
     for (const key of Object.keys(value)) {
-      masked[key] = maskLeaves(value[key]);
+      masked[key] = maskLeaves(value[key], depth + 1);
     }
     return masked;
   }
   return value;
 }
 
-function sanitizeNode(value, inCardContext) {
+function sanitizeNode(value, inCardContext, depth) {
+  if (depth > MAX_DEPTH) {
+    return TRUNCATED;
+  }
   if (typeof value === "string") {
-    return sanitizeString(value);
+    return sanitizeString(value, depth);
   }
   if (typeof value === "number") {
-    const text = String(value);
-    const masked = maskCardNumbersInString(text);
-    return masked === text ? value : masked;
+    return sanitizeNumber(value);
   }
   if (Array.isArray(value)) {
-    return value.map((item) => sanitizeNode(item, inCardContext));
+    return value.map((item) => sanitizeNode(item, inCardContext, depth + 1));
   }
   if (value && typeof value === "object") {
     const objectInCardContext = inCardContext || holdsCardNumber(value);
     const sanitized = {};
     for (const key of Object.keys(value)) {
       sanitized[key] = isSensitiveKey(key, objectInCardContext)
-        ? maskLeaves(value[key])
-        : sanitizeNode(value[key], objectInCardContext || isCardContextKey(key));
+        ? maskLeaves(value[key], depth + 1)
+        : sanitizeNode(value[key], objectInCardContext || isCardContextKey(key), depth + 1);
     }
     return sanitized;
   }
@@ -190,21 +235,21 @@ function holdsCardNumber(object) {
     if (CARD_NUMBER_KEY.some((pattern) => pattern.test(normalizeKey(key))) && field !== null && field !== "") {
       return true;
     }
-    if (typeof field !== "string" && typeof field !== "number") {
-      return false;
+    if (typeof field === "number") {
+      return sanitizeNumber(field) !== field;
     }
-    const text = String(field);
-    return maskCardNumbersInString(text) !== text;
+    return typeof field === "string" && maskCardNumbersInString(field) !== field;
   });
 }
 
 /**
- * Masks credit card data (card numbers, expiration dates, CVV/CVC and AVS codes) with "x".
- * Fields are matched by name; card numbers are also detected by content (Luhn-valid 13–19 digits).
+ * Masks credit card data (card numbers, expiration dates, CVV/CVC, AVS codes and track data) with "x".
+ * Fields are matched by name; card numbers and track data are also detected by content.
+ * Subtrees nested deeper than MAX_DEPTH are replaced with "[TRUNCATED]".
  * Returns a new value; the input is not mutated.
  */
 function sanitizeValue(value) {
-  return sanitizeNode(value, false);
+  return sanitizeNode(value, false, 0);
 }
 
 function sanitizeRecord(record) {

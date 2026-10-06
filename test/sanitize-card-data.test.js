@@ -328,3 +328,62 @@ test("sanitizeRecord does not mutate the input record", () => {
   sanitizeRecord(record);
   assert.deepEqual(record, {url: "/?cvv=1", path: "/", query: {cvv: "1"}, headers: {}, body: {cvv: "1"}});
 });
+
+test("masks magnetic stripe track data by field name and by content", () => {
+  const track1 = `%B${VISA}^DOE/JANE^2912101000000?`;
+  const track2 = `;${VISA}=29121010000000000?`;
+  assert.deepEqual(sanitizeValue({card: {track1, track2}, trackData: "abc", magstripe: "def"}), {
+    card: {track1: "x".repeat(track1.length), track2: "x".repeat(track2.length)},
+    trackData: "xxx",
+    magstripe: "xxx"
+  });
+  assert.equal(sanitizeValue({raw: `swipe ${track2} end`}).raw, `swipe ${"x".repeat(track2.length)} end`);
+  assert.equal(sanitizeValue({raw: `swipe ${track1} end`}).raw, `swipe ${"x".repeat(track1.length)} end`);
+});
+
+test("masks card fields inside JSON text bodies and keeps them valid JSON", () => {
+  const out = sanitizeRecord({
+    url: "/",
+    path: "/",
+    query: {},
+    headers: {},
+    body: JSON.stringify({card: {number: VISA, cvv: "123", exp_month: 12}, note: "hi"})
+  });
+  assert.deepEqual(JSON.parse(out.body), {card: {number: "xxxxxxxxxxxxxxxx", cvv: "xxx", exp_month: "xx"}, note: "hi"});
+  assert.equal(sanitizeValue({s: "{not json cvv"}).s, "{not json cvv");
+});
+
+test("masks URL-encoded card numbers in URLs", () => {
+  assert.equal(maskCardNumbersInString("/pay?payload=4111%201111%201111%201111"), "/pay?payload=xxxx%20xxxx%20xxxx%20xxxx");
+  assert.equal(maskCardNumbersInString("/pay/4111%2D1111%2D1111%2D1111"), "/pay/xxxx%2Dxxxx%2Dxxxx%2Dxxxx");
+  assert.equal(maskCardNumbersInString("/pay?n=4111+1111+1111+1111"), "/pay?n=xxxx+xxxx+xxxx+xxxx");
+});
+
+test("masks x- prefixed headers and extra security code aliases", () => {
+  assert.deepEqual(sanitizeValue({"x-cid": "123", "x-csc": "456", "x-avs-code": "N", "x-cvv": "1"}), {
+    "x-cid": "xxx", "x-csc": "xxx", "x-avs-code": "x", "x-cvv": "x"
+  });
+  assert.deepEqual(sanitizeValue({card: {verificationValue: "123", securityValue: "456", cv2: "789", cvd: "1"}}), {
+    card: {verificationValue: "xxx", securityValue: "xxx", cv2: "xxx", cvd: "x"}
+  });
+});
+
+test("masks numeric card numbers beyond the safe integer range", () => {
+  assert.equal(sanitizeValue({n: 6011000000000000001}).n, "xxxxxxxxxxxxxxxxxxx");
+  assert.equal(sanitizeValue({n: 1786417200000123456}).n, 1786417200000123456);
+});
+
+test("does not mask non-card expiration fields", () => {
+  assert.deepEqual(sanitizeValue({passExpirationYear: 2029, promotionExpiryMonth: 12}), {
+    passExpirationYear: 2029, promotionExpiryMonth: 12
+  });
+});
+
+test("only treats keys that start or end with a card word as card objects", () => {
+  assert.deepEqual(sanitizeValue({discarded: {number: 42, code: "PROMO", authorization: "Bearer t"}}), {
+    discarded: {number: 42, code: "PROMO", authorization: "Bearer t"}
+  });
+  assert.deepEqual(sanitizeValue({paymentCard: {number: "1"}, cards: [{code: "1"}], cardInfo: {month: 1}}), {
+    paymentCard: {number: "x"}, cards: [{code: "x"}], cardInfo: {month: "x"}
+  });
+});

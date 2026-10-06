@@ -44,7 +44,9 @@ function buildRecord(req, now) {
     headers: req.headers || {}
   };
 
-  if (req.body !== undefined) {
+  if (Buffer.isBuffer(req.body)) {
+    record.body = req.body.toString("utf8");
+  } else if (req.body !== undefined) {
     record.body = req.body;
   }
 
@@ -74,7 +76,14 @@ function cloneRecord(req, now) {
 }
 
 function snapshotRecord(req, now) {
-  return sanitizeRecord(cloneRecord(req, now));
+  const record = cloneRecord(req, now);
+  try {
+    return sanitizeRecord(record);
+  } catch (_err) {
+    const withoutBody = Object.assign({}, record);
+    delete withoutBody.body;
+    return sanitizeRecord(withoutBody);
+  }
 }
 
 function serializeRecord(record) {
