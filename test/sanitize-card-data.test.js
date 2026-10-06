@@ -368,9 +368,9 @@ test("masks x- prefixed headers and extra security code aliases", () => {
   });
 });
 
-test("masks numeric card numbers beyond the safe integer range", () => {
-  assert.equal(sanitizeValue({n: 6011000000000000001}).n, "xxxxxxxxxxxxxxxxxxx");
-  assert.equal(sanitizeValue({n: 1786417200000123456}).n, 1786417200000123456);
+test("masks numeric card numbers beyond the safe integer range inside card objects", () => {
+  assert.equal(sanitizeValue({card: {n: 6011000000000000001}}).card.n, "xxxxxxxxxxxxxxxxxxx");
+  assert.equal(sanitizeValue({card: {n: 1786417200000123456}}).card.n, 1786417200000123456);
 });
 
 test("does not mask non-card expiration fields", () => {
@@ -386,4 +386,49 @@ test("only treats keys that start or end with a card word as card objects", () =
   assert.deepEqual(sanitizeValue({paymentCard: {number: "1"}, cards: [{code: "1"}], cardInfo: {month: 1}}), {
     paymentCard: {number: "x"}, cards: [{code: "x"}], cardInfo: {month: "x"}
   });
+});
+
+test("masks card numbers separated by URL-encoded plus signs", () => {
+  assert.equal(maskCardNumbersInString("/pay?n=4111%2B1111%2B1111%2B1111"), "/pay?n=xxxx%2Bxxxx%2Bxxxx%2Bxxxx");
+});
+
+test("masks more card number and security code aliases", () => {
+  assert.deepEqual(sanitizeValue({"x-pan": "4111", cvvValue: "1", cvcCode: "2", card: {verificationCode: "3"}}), {
+    "x-pan": "xxxx", cvvValue: "x", cvcCode: "x", card: {verificationCode: "x"}
+  });
+});
+
+test("masks Adyen encrypted card fields", () => {
+  assert.deepEqual(sanitizeValue({
+    paymentMethod: {
+      encryptedCardNumber: "adyenjs_1",
+      encryptedExpiryMonth: "adyenjs_2",
+      encryptedExpiryYear: "adyenjs_3",
+      encryptedSecurityCode: "adyenjs_4"
+    }
+  }), {
+    paymentMethod: {
+      encryptedCardNumber: "xxxxxxxxx",
+      encryptedExpiryMonth: "xxxxxxxxx",
+      encryptedExpiryYear: "xxxxxxxxx",
+      encryptedSecurityCode: "xxxxxxxxx"
+    }
+  });
+});
+
+test("keeps JSON text unchanged when it holds no card data", () => {
+  const text = '{"orderId":9007199254740993,"a":1,"a":2}';
+  assert.equal(sanitizeValue({body: text}).body, text);
+});
+
+test("matches card object keys on whole words only", () => {
+  assert.deepEqual(sanitizeValue({cardinality: {number: 42, code: "PROMO"}}), {cardinality: {number: 42, code: "PROMO"}});
+  assert.deepEqual(sanitizeValue({creditcard: {number: "1"}, card_info: {code: "2"}, ccInfo: {year: 3}}), {
+    creditcard: {number: "x"}, card_info: {code: "x"}, ccInfo: {year: "x"}
+  });
+});
+
+test("masks unsafe integers with a card number shape only inside card objects", () => {
+  assert.equal(sanitizeValue({orderId: 234567890123456780}).orderId, 234567890123456780);
+  assert.equal(sanitizeValue({card: {pin: 6011000000000000001}}).card.pin, "xxxxxxxxxxxxxxxxxxx");
 });

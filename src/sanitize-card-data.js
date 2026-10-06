@@ -4,35 +4,43 @@ const MASK_CHAR = "x";
 const MAX_DEPTH = 64;
 const TRUNCATED = "[TRUNCATED]";
 
-const URL_ENCODED_SEPARATOR = /%20|%2[dD]/g;
-const CARD_NUMBER_CANDIDATE = /(?<![0-9A-Za-z])\d(?:(?:[ +-]|%20|%2[dD])?\d){12,18}(?![0-9A-Za-z])/g;
+const URL_ENCODED_SEPARATOR = /%20|%2[bBdD]/g;
+const CARD_NUMBER_CANDIDATE = /(?<![0-9A-Za-z])\d(?:(?:[ +-]|%20|%2[bBdD])?\d){12,18}(?![0-9A-Za-z])/g;
 const TRACK_DATA = [
   /%B\d{13,19}\^[^^]{0,26}\^[^?]{0,80}\?/g,
   /;\d{13,19}=\d{0,40}\?/g
 ];
 
-const CARD_CONTEXT_KEY = /^(card|cc|credit)|cards?$|card(info|data|details)$/;
-const CARD_NUMBER_KEY = [/(card|cc)(number|num|no)$/, /^pan$/];
+const CARD_CONTEXT_WORDS = new Set(["card", "cards", "cc", "credit", "creditcard", "creditcards"]);
+const CARD_CONTEXT_COMPOUND_KEY = /^(credit|debit|payment|customer|stored|saved)?cards?$/;
+const CARD_NUMBER_KEY = [/(card|cc)(number|num|no)$/, /^x?pan$/];
 const SENSITIVE_KEY_ANYWHERE = [
   ...CARD_NUMBER_KEY,
-  /(cvv2?|cvc2?|cv2|ccv|cvn|cvd|securitycode)$/,
+  /(cvv2?|cvc2?|cv2|ccv|cvn|cvd)(value|code|number|no)?$/,
+  /securitycode$/,
   /^x?(creditcard|card|cc)?(cid|csc)$/,
   /(card|cc)(code|verificationcode|verificationvalue|securityvalue)$/,
   /^x?avs|avs$|(card|cc)avs/,
-  /^x?(creditcard|card|cc)?exp(iry|iration)?(month|mon|year|yr|mm|yy|yyyy)$/,
+  /^x?(encrypted)?(creditcard|card|cc)?exp(iry|iration)?(month|mon|year|yr|mm|yy|yyyy)$/,
+  /^encrypted(card)?exp(iry|iration)?(date)?$/,
   /(card|cc)exp/,
   /^x?(track[12]?|track[12]?data|magstripe|magstripedata|magneticstripe)$/
 ];
 // btrz-api-sales order payments send the card security value as `authorization` next to `ccnumber`.
 const SENSITIVE_KEY_IN_CARD_CONTEXT =
-  /^(number|num|no|month|mon|year|yr|mm|yy|yyyy|code|authorization|verificationvalue|securityvalue)$|^exp/;
+  /^(number|num|no|month|mon|year|yr|mm|yy|yyyy|code|authorization|verificationcode|verificationvalue|securityvalue)$|^exp/;
 
 function normalizeKey(key) {
   return String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function keyWords(key) {
+  return String(key).replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
 function isCardContextKey(key) {
-  return CARD_CONTEXT_KEY.test(normalizeKey(key));
+  return keyWords(key).some((word) => CARD_CONTEXT_WORDS.has(word)) ||
+    CARD_CONTEXT_COMPOUND_KEY.test(normalizeKey(key));
 }
 
 function isSensitiveKey(key, inCardContext) {
@@ -98,7 +106,7 @@ function maskCardNumbersInString(text) {
     if (!looksLikeCardNumber(match.replace(URL_ENCODED_SEPARATOR, "").replace(/\D/g, ""))) {
       return match;
     }
-    return match.replace(/(%20|%2[dD])|\d/g, (char, separator) => separator || MASK_CHAR);
+    return match.replace(/(%20|%2[bBdD])|\d/g, (char, separator) => separator || MASK_CHAR);
   });
 }
 
@@ -153,7 +161,8 @@ function sanitizeJsonText(text, depth) {
   } catch (_err) {
     return null;
   }
-  return JSON.stringify(sanitizeNode(parsed, false, depth + 1));
+  const sanitized = JSON.stringify(sanitizeNode(parsed, false, depth + 1));
+  return sanitized === JSON.stringify(parsed) ? text : sanitized;
 }
 
 function sanitizeString(text, depth) {
@@ -171,9 +180,9 @@ function sanitizeString(text, depth) {
   return maskCardNumbersInString(masked);
 }
 
-function sanitizeNumber(value) {
+function sanitizeNumber(value, inCardContext) {
   const text = String(value);
-  if (Number.isInteger(value) && !Number.isSafeInteger(value) && hasCardNumberShape(text)) {
+  if (inCardContext && Number.isInteger(value) && !Number.isSafeInteger(value) && hasCardNumberShape(text)) {
     return maskAll(text);
   }
   const masked = maskCardNumbersInString(text);
@@ -211,7 +220,7 @@ function sanitizeNode(value, inCardContext, depth) {
     return sanitizeString(value, depth);
   }
   if (typeof value === "number") {
-    return sanitizeNumber(value);
+    return sanitizeNumber(value, inCardContext);
   }
   if (Array.isArray(value)) {
     return value.map((item) => sanitizeNode(item, inCardContext, depth + 1));
@@ -236,7 +245,7 @@ function holdsCardNumber(object) {
       return true;
     }
     if (typeof field === "number") {
-      return sanitizeNumber(field) !== field;
+      return sanitizeNumber(field, false) !== field;
     }
     return typeof field === "string" && maskCardNumbersInString(field) !== field;
   });

@@ -45,7 +45,10 @@ function buildRecord(req, now) {
   };
 
   if (Buffer.isBuffer(req.body)) {
-    record.body = req.body.toString("utf8");
+    const text = req.body.toString("utf8");
+    if (Buffer.from(text, "utf8").equals(req.body)) {
+      record.body = text;
+    }
   } else if (req.body !== undefined) {
     record.body = req.body;
   }

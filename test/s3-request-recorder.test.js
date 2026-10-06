@@ -487,6 +487,18 @@ test("records Buffer bodies as sanitized text instead of raw bytes", async () =>
   assert.equal(content.includes("4111111111111111"), false);
 });
 
+test("omits binary Buffer bodies that are not valid UTF-8", async () => {
+  const {record} = await recordOne({
+    method: "POST",
+    url: "/v1/upload",
+    path: "/v1/upload",
+    query: {},
+    headers: {},
+    body: Buffer.from([0xff, 0x00, 0x80])
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(record, "body"), false);
+});
+
 test("truncates body subtrees nested deeper than the sanitizer depth limit", async () => {
   let body = {cvv: "123"};
   for (let i = 0; i < 3000; i++) {
