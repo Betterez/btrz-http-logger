@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 const fsp = fs.promises;
 const {GetObjectCommand, PutObjectCommand, S3Client} = require("@aws-sdk/client-s3");
+const {sanitizeRecord} = require("./sanitize-card-data");
 
 function parseQueryFromUrl(url) {
   if (!url || typeof url !== "string") {
@@ -50,7 +51,7 @@ function buildRecord(req, now) {
   return record;
 }
 
-function snapshotRecord(req, now) {
+function cloneRecord(req, now) {
   const record = buildRecord(req, now);
   try {
     return JSON.parse(JSON.stringify(record));
@@ -70,6 +71,10 @@ function snapshotRecord(req, now) {
       };
     }
   }
+}
+
+function snapshotRecord(req, now) {
+  return sanitizeRecord(cloneRecord(req, now));
 }
 
 function serializeRecord(record) {
